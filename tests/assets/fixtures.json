@@ -1,0 +1,17 @@
+[
+  {"id": 1, "event": 1, "team_h": 1, "team_a": 2, "team_h_difficulty": 2, "team_a_difficulty": 4,
+   "kickoff_time": "2026-08-15T14:00:00Z", "finished": false, "started": false,
+   "team_h_score": null, "team_a_score": null},
+  {"id": 2, "event": 1, "team_h": 3, "team_a": 1, "team_h_difficulty": 3, "team_a_difficulty": 2,
+   "kickoff_time": "2026-08-16T14:00:00Z", "finished": false, "started": false,
+   "team_h_score": null, "team_a_score": null},
+  {"id": 3, "event": 2, "team_h": 2, "team_a": 3, "team_h_difficulty": 3, "team_a_difficulty": 3,
+   "kickoff_time": "2026-08-22T14:00:00Z", "finished": false, "started": false,
+   "team_h_score": null, "team_a_score": null},
+  {"id": 4, "event": 3, "team_h": 1, "team_a": 3, "team_h_difficulty": 1, "team_a_difficulty": 5,
+   "kickoff_time": "2026-08-29T14:00:00Z", "finished": false, "started": false,
+   "team_h_score": null, "team_a_score": null},
+  {"id": 5, "event": null, "team_h": 1, "team_a": 2, "team_h_difficulty": 3, "team_a_difficulty": 3,
+   "kickoff_time": null, "finished": false, "started": false,
+   "team_h_score": null, "team_a_score": null}
+]

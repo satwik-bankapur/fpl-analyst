@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Local dev database + env
+*.db
+*.sqlite
+*.sqlite3
+.env
+
+# OS
+.DS_Store
+Thumbs.db
