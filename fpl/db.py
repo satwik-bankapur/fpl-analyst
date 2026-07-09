@@ -1,7 +1,8 @@
-"""Engine / session factory and schema creation.
+"""Engine / session factory.
 
-SQLAlchemy models (see `models`) are the single source of truth for the schema.
-`init_db()` materializes them; it works against both SQLite (dev) and Postgres (prod).
+Schema is managed by Alembic migrations (see `migrations/`, applied via
+`fpl.migrate.upgrade_to_head` / `python -m fpl init-db`) — NOT by create_all.
+`Base.metadata.create_all` is test-only (tests build a throwaway in-memory schema).
 """
 from __future__ import annotations
 
@@ -10,7 +11,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
-from .models import Base
 
 
 def make_engine(url: str | None = None) -> Engine:
@@ -32,8 +32,3 @@ def make_engine(url: str | None = None) -> Engine:
 
 engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False, future=True)
-
-
-def init_db(eng: Engine | None = None) -> None:
-    """Create all tables. Idempotent (create-if-not-exists)."""
-    Base.metadata.create_all(eng or engine)

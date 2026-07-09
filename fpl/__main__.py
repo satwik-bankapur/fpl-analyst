@@ -1,9 +1,12 @@
 """CLI for the data layer.
 
-    python -m fpl init-db     create all tables
+    python -m fpl init-db     apply Alembic migrations (create/upgrade schema)
     python -m fpl sync        run sync_fpl() once against the live FPL API
     python -m fpl mode        print derived app_mode (PRESEASON / IN_SEASON)
     python -m fpl run         start the in-process scheduler (blocks)
+
+Schema is managed by Alembic, never create_all (see fpl/migrate.py). `sync`, `mode`,
+and `run` assume the schema already exists — run `init-db` once first.
 """
 from __future__ import annotations
 
@@ -12,8 +15,9 @@ import logging
 import sys
 import time
 
-from .db import SessionLocal, init_db
+from .db import SessionLocal
 from .errors import FPLError
+from .migrate import upgrade_to_head
 from .sync import derive_mode, next_gameweek, sync_fpl
 
 
@@ -28,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging()
     parser = argparse.ArgumentParser(prog="fpl", description="FPL Analyst data layer (Layer 1)")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init-db", help="create all tables")
+    sub.add_parser("init-db", help="apply Alembic migrations (create/upgrade schema)")
     sub.add_parser("sync", help="run sync_fpl() once against the live FPL API")
     sub.add_parser("mode", help="print derived app_mode")
     sub.add_parser("run", help="start the in-process scheduler (blocks)")
@@ -36,12 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "init-db":
-        init_db()
-        print("tables created")
+        upgrade_to_head()
+        print("schema migrated to head")
         return 0
 
     if args.cmd == "sync":
-        init_db()
         try:
             result = sync_fpl()
         except FPLError as exc:
@@ -54,7 +57,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "mode":
-        init_db()
         with SessionLocal() as session:
             mode = derive_mode(session)
             ng = next_gameweek(session)
@@ -64,7 +66,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         from .scheduler import build_scheduler
 
-        init_db()
         scheduler = build_scheduler()
         scheduler.start()
         print("scheduler started (Ctrl-C to stop)")

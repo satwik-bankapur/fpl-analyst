@@ -5,6 +5,7 @@ description = "AI FPL analyst — Layer 1: data pipeline (FPL client + schema + 
 requires-python = ">=3.11"
 dependencies = [
     "sqlalchemy>=2.0",
+    "alembic>=1.13",
     "httpx>=0.27",
     "apscheduler>=3.10,<4",
     "pydantic-settings>=2.0",
