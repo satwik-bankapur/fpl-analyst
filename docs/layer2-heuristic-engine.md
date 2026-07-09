@@ -189,3 +189,8 @@ Rules:
   7. Components blob validates against the §3 shape (schema test) for every scored player.
 
 Definition of done: `score_all()` fills `ep_scores` for all ~700 players in < 5s, every row passes the components schema test, and eyeballing the top-20 by `ep_next4` against your own FPL knowledge produces no absurdities.
+
+## 9. Implementation drift notes (code is correct; doc trails reality)
+
+- 2026-07-09: `score_player(player, ctx)` takes an `EngineContext` built once by `build_context(...)` instead of the §8 six-argument signature `score_player(player, fixtures, teams, config, mode, archive)`. Same contract and output; the context bundles fixtures/teams/config/mode/horizon so they are computed once per sync rather than re-derived for each of ~800 players.
+- 2026-07-09: the §5 baseline table is recomputed on demand at the start of PRESEASON scoring (inside `build_context`) rather than persisted to a `baseline_ep` table at rollover. It is deterministic and cheap (~700 archive rows), so the materialized-dict form is used without the persistence/rollover-hook coupling the spec text implies.
