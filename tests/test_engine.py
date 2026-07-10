@@ -146,6 +146,70 @@ def test_preseason_promoted_baseline_discount():
     assert rp.components["base"] == pytest.approx(rn.components["base"] * 0.85, rel=1e-6)
 
 
+# --- xGI minutes floor on the archive path (§9 fix, config v1.2) -----------
+
+def _archive_mid_band(price=4.7, minutes=3000, xgi=6.0, ppg=3.0):
+    """Enough well-sampled MID rows to populate the (MID, band) baseline.
+    xgi_per90 = xgi/minutes*90 = 6.0/3000*90 = 0.18 by default."""
+    rows = []
+    pid = 200
+    for _ in range(3):
+        pid += 1
+        rows.append({"id": pid, "full_name": f"Mid{pid}", "team_id": 1, "position": 3,
+                     "price": price, "ppg": ppg, "xgi": xgi, "minutes": minutes,
+                     "season": "2025-26"})
+    return rows
+
+
+def _preseason_ctx(archive, players):
+    gws = [{"id": i, "name": f"GW{i}", "finished": False, "is_current": False,
+            "is_next": i == 1} for i in range(1, 6)]
+    fx = [fixture(1, 1, 1, 2, hdiff=3)]  # team 1 home vs team 2 in GW1
+    return build_context(players, TEAMS, fx, gws, mode="PRESEASON", anchor=1, archive=archive)
+
+
+def test_preseason_thin_archive_minutes_xgi_falls_back_to_baseline():
+    """A 2-minute archive player with absurd raw xGI must fall back to the band
+    baseline xgi_per90, be flagged, and NOT ride an inflated attack term."""
+    archive = _archive_mid_band()  # (MID, band 4.5) baseline xgi_per90 == 0.18
+    # thin cameo: 2 minutes, xgi 0.08 -> raw xgi_per90 would be 0.08/2*90 = 3.6
+    archive.append({"id": 9500, "full_name": "Thin Cameo", "team_id": 1, "position": 3,
+                    "price": 4.9, "ppg": 1.0, "xgi": 0.08, "minutes": 2, "season": "2025-26"})
+    thin = player(pid=9500, team_id=1, position=3, price=4.9, full_name="Thin Cameo")
+
+    ctx = _preseason_ctx(archive, [thin])
+    r = score_player(thin, ctx)
+    ai = r.components["attack_inputs"]
+    assert ai["fallback"] is True
+    assert ai["xgi_per90"] == pytest.approx(0.18, abs=1e-9)  # baseline, not 3.6
+    assert ai["minutes_sample"] == 2                          # real archive minutes kept
+    assert "thin_minutes_sample" in r.components["flags"]
+    # attack rides the baseline xgi, not the exploded raw value.
+    assert r.components["attack"] < 1.0
+
+
+def test_preseason_well_sampled_archive_unperturbed_by_xgi_floor():
+    """A 2000+ minute archive player must be identical to pre-fix behaviour:
+    raw xgi_per90, no fallback, no thin flag (the fix must not touch the
+    well-sampled population)."""
+    archive = _archive_mid_band()
+    # 2500-min player, id-matched; raw xgi_per90 = 8.0/2500*90 = 0.288
+    archive.append({"id": 9600, "full_name": "Regular Starter", "team_id": 1, "position": 3,
+                    "price": 6.0, "ppg": 5.0, "xgi": 8.0, "minutes": 2500, "season": "2025-26"})
+    regular = player(pid=9600, team_id=1, position=3, price=6.0, full_name="Regular Starter")
+
+    ctx = _preseason_ctx(archive, [regular])
+    r = score_player(regular, ctx)
+    # Pre-fix the archive branch always produced exactly: raw xgi_per90, fallback False,
+    # no thin flag. Asserting those three proves bit-for-bit non-perturbation.
+    assert r.components["attack_inputs"] == {
+        "xgi_per90": round(8.0 / 2500 * 90, 3),  # 0.288, raw
+        "minutes_sample": 2500,
+        "fallback": False,
+    }
+    assert "thin_minutes_sample" not in r.components["flags"]
+
+
 # --- §8.7 components schema validates for EVERY scored player --------------
 
 _REQUIRED_TOP = {

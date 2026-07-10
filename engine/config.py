@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class HeuristicConfig:
-    config_version: str = "v1.0"
+    config_version: str = "v1.2"
 
     # base/attack blend and their internal weights
     W_BASE: float = 0.5
@@ -36,7 +36,7 @@ class HeuristicConfig:
     CS_VENUE_ADJ: float = 0.04
     CS_PROB_CLAMP: tuple = (0.05, 0.60)
     CS_VALUE: dict = field(default_factory=lambda: {1: 4, 2: 4, 3: 1, 4: 0})  # GK/DEF/MID/FWD
-    SAVE_PTS_BASE: float = 0.6  # flat GK save-points baseline per fixture
+    SAVE_PTS_BASE: float = 0.4  # flat GK save-points baseline per fixture
 
     # attacking return valuation
     GOAL_VALUE: dict = field(default_factory=lambda: {1: 6, 2: 6, 3: 5, 4: 4})  # GK/DEF/MID/FWD

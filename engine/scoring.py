@@ -197,13 +197,24 @@ def _resolve_preseason(player, ctx) -> _Resolved:
     if archive_row is not None:
         a_min = _f(archive_row.get("minutes"))
         ppg = _f(archive_row.get("ppg"))
+        # Apply the xGI minutes floor to the archive path too (§9 fix, 2026-07-10):
+        # a handful of archive minutes explodes xgi_per90, so mirror _resolve_current
+        # and fall back to the (position, price-band) baseline xgi below the floor.
+        if a_min >= cfg.MIN_MINUTES_XGI:
+            xgi90 = _xgi_per90(archive_row.get("xgi"), a_min)
+            attack_fallback = False
+        else:
+            base = baseline_lookup(ctx.baseline, player["position"], _f(player.get("price")), cfg)
+            xgi90 = base["xgi_per90"] if base else 0.0
+            attack_fallback = True
+            flags.append("thin_minutes_sample")
         return _Resolved(
             data_basis=f"archive_{ctx.archive_season}", match_method=method,
             form=ppg, ppg=ppg,  # form is meaningless pre-season -> archive ppg (§5.1)
-            xgi_per90=_xgi_per90(archive_row.get("xgi"), a_min),
-            minutes_sample=int(a_min),
+            xgi_per90=xgi90,
+            minutes_sample=int(a_min),  # real archive minutes, even when xgi fell back
             minutes_share=min(1.0, a_min / _SEASON_MINUTES),
-            attack_fallback=False, flags=flags,
+            attack_fallback=attack_fallback, flags=flags,
         )
 
     # 2/3. No archive match -> baseline table (× discount if promoted).
