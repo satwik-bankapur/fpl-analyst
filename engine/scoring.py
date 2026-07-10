@@ -288,7 +288,9 @@ def _fixture_ep(base, attack, position, fx, team_id, ctx) -> dict:
     cs_prob = cfg.cs_prob(fdr) + (cfg.CS_VENUE_ADJ if is_home else -cfg.CS_VENUE_ADJ)
     lo, hi = cfg.CS_PROB_CLAMP
     cs_prob = min(hi, max(lo, cs_prob))
-    cs_pts = cs_prob * cfg.CS_VALUE[position]
+    # W_CS weights the expected-CS term only (completes the §2.3 double-count
+    # correction for CS); the flat GK save-base is a separate lever, unscaled.
+    cs_pts = cfg.W_CS * cs_prob * cfg.CS_VALUE[position]
     if position == 1:  # GK save-points baseline, flat per fixture
         cs_pts += cfg.SAVE_PTS_BASE
 

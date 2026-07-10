@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class HeuristicConfig:
-    config_version: str = "v1.2"
+    config_version: str = "v1.3"
 
     # base/attack blend and their internal weights
     W_BASE: float = 0.5
@@ -36,6 +36,10 @@ class HeuristicConfig:
     CS_VENUE_ADJ: float = 0.04
     CS_PROB_CLAMP: tuple = (0.05, 0.60)
     CS_VALUE: dict = field(default_factory=lambda: {1: 4, 2: 4, 3: 1, 4: 0})  # GK/DEF/MID/FWD
+    # Weight on expected clean-sheet points (cs_prob×CS_VALUE only — NOT save-base).
+    # Realized CS already enters `base` at 0.5, so 0.5 here completes the same 1.0×
+    # double-count correction the base/attack blend performs (§2.3 logic, applied to CS).
+    W_CS: float = 0.5
     SAVE_PTS_BASE: float = 0.4  # flat GK save-points baseline per fixture
 
     # attacking return valuation

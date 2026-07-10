@@ -1,5 +1,6 @@
 """Layer 2 engine tests (spec §8) + guards on the two intentional design choices."""
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -280,3 +281,46 @@ def test_clean_sheet_added_after_multipliers_not_scaled():
 def test_base_and_attack_blend_is_5050_and_both_present():
     """The double-count correction is the 50/50 blend — neither side zeroed (§2.3)."""
     assert DEFAULT_CONFIG.W_BASE == 0.5 and DEFAULT_CONFIG.W_ATTACK == 0.5
+
+
+# --- W_CS: expected-CS weight completes the §2.3 correction for CS (v1.3) ---
+
+def _fx0_at_wcs(pos, w_cs, hdiff=2):
+    """Score a `pos` player over one fixture at the given W_CS; return fixtures[0]."""
+    fx = [fixture(1, 11, 1, 2, hdiff=hdiff)]
+    cfg = replace(DEFAULT_CONFIG, W_CS=w_cs)
+    ctx = build_context([player()], TEAMS, fx, gameweeks(),
+                        mode="IN_SEASON", anchor=11, config=cfg)
+    return score_player(player(position=pos, minutes=900), ctx).components["fixtures"][0]
+
+
+def _core(f):
+    return f["fixture_ep"] - f["cs_pts"]  # fixture_ep = core + cs_pts_blob
+
+
+def test_wcs_halves_def_cs_term_core_unchanged():
+    """(a) A DEF's cs contribution halves at W_CS=0.5 vs 1.0; core is untouched."""
+    half, full = _fx0_at_wcs(2, 0.5), _fx0_at_wcs(2, 1.0)  # DEF has no save-base
+    assert half["cs_pts"] == pytest.approx(0.5 * full["cs_pts"], abs=1e-2)
+    assert _core(half) == pytest.approx(_core(full), abs=1e-2)
+    assert half["cs_pts"] > 0  # guard: there IS a cs term to halve
+
+
+def test_wcs_does_not_scale_gk_save_base():
+    """(b) The GK save-base is NOT scaled by W_CS: at W_CS=0 only save-base remains."""
+    zero = _fx0_at_wcs(1, 0.0)
+    assert zero["cs_pts"] == pytest.approx(DEFAULT_CONFIG.SAVE_PTS_BASE, abs=1e-2)
+    # at W_CS=0.5 the fixture cs_pts = 0.5·cs_prob·CS_VALUE[GK] + full save-base
+    half = _fx0_at_wcs(1, 0.5)
+    expected = 0.5 * half["cs_prob"] * DEFAULT_CONFIG.CS_VALUE[1] + DEFAULT_CONFIG.SAVE_PTS_BASE
+    assert half["cs_pts"] == pytest.approx(expected, abs=1e-2)
+
+
+def test_wcs_leaves_fwd_untouched_and_mid_core_intact():
+    """(c) FWD (CS_VALUE=0) is identical across W_CS; MID changes only via its cs term."""
+    fwd_half, fwd_full = _fx0_at_wcs(4, 0.5), _fx0_at_wcs(4, 1.0)
+    assert fwd_half["cs_pts"] == 0.0 and fwd_full["cs_pts"] == 0.0
+    assert fwd_half["fixture_ep"] == pytest.approx(fwd_full["fixture_ep"], abs=1e-9)
+    mid_half, mid_full = _fx0_at_wcs(3, 0.5), _fx0_at_wcs(3, 1.0)
+    assert mid_half["cs_pts"] == pytest.approx(0.5 * mid_full["cs_pts"], abs=1e-2)
+    assert _core(mid_half) == pytest.approx(_core(mid_full), abs=1e-2)
