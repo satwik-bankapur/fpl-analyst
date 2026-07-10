@@ -29,8 +29,9 @@ from .models import (
     Team,
 )
 from .parsers import parse_fixture, parse_gameweek, parse_player, parse_team, to_int
-from .ep_stub import stub_ep_rows
 from .db import SessionLocal
+
+from engine.scoring import score_all
 
 log = logging.getLogger("fpl.sync")
 
@@ -85,6 +86,33 @@ def get_meta(session, key: str) -> str | None:
 
 def set_meta(session, key: str, value: str) -> None:
     session.merge(Meta(key=key, value=value))
+
+
+def _load_archive(session) -> list[dict] | None:
+    """Load the latest archived season's rows as engine-ready dicts.
+
+    Feeds the Layer 2 engine's pre-season resolution and early-season blend (§5).
+    Returns None when nothing is archived yet (in-season, pre-first-rollover).
+    """
+    rows = session.scalars(select(PlayerArchive)).all()
+    if not rows:
+        return None
+    latest = max(r.season for r in rows)
+    return [
+        {
+            "id": r.id,
+            "full_name": r.full_name,
+            "team_id": r.team_id,
+            "position": r.position,
+            "price": float(r.price),
+            "ppg": float(r.ppg),
+            "xgi": float(r.xgi),
+            "minutes": r.minutes,
+            "season": r.season,
+        }
+        for r in rows
+        if r.season == latest
+    ]
 
 
 # --- season rollover (§6.2) ------------------------------------------------
@@ -221,13 +249,17 @@ def sync_fpl(client: FPLClient | None = None, session_factory=SessionLocal) -> S
                 if fixtures:
                     session.execute(insert(Fixture), fixtures)
 
-                # STEP 6 — recompute ep_scores via the STUB writer (table rewrite).
-                ep_rows = stub_ep_rows(players, fixtures, anchor)
+                # STEP 6 — recompute ep_scores via the Layer 2 engine (table rewrite).
+                mode = derive_mode(session)
+                archive_rows = _load_archive(session)
+                results = score_all(
+                    players, teams, fixtures, gameweeks,
+                    mode=mode, anchor=anchor, archive=archive_rows,
+                )
+                ep_rows = [r.to_row() for r in results]
                 session.execute(delete(EpScore))
                 if ep_rows:
                     session.execute(insert(EpScore), ep_rows)
-
-                mode = derive_mode(session)
 
         duration = time.monotonic() - started
         result = SyncResult(
