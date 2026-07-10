@@ -134,3 +134,9 @@ That system: continuous ingestion, streaming synthesis, LLM-heavy interpretation
 7. Cache: identical request twice → one graph run; changed captain → new input_hash → rerun.
 
 Definition of done: golden-path test green end-to-end with stub Writer; full state serializes to < ~50KB; a real team ID produces a structurally complete (if robotically written) brief in < 3s locally with zero LLM spend.
+
+## 8. Implementation drift notes (code is correct; doc trails reality)
+
+- 2026-07-10: `cold_form` detection (§2.1) is restricted to `IN_SEASON` mode. Pre-season the raw `form` field is undefined (Layer 2 §5.1 — the engine itself substitutes archive ppg for form in PRESEASON), so applying the `form < 0.6·ppg` rule against a zero-form pre-season snapshot false-positives the entire squad. The other five problem types are mode-agnostic. Surfaced by the launch-mode (pre-season draft) golden brief; guarded in `graph/nodes/squad_analyst._diagnose`.
+- 2026-07-10: the graph is realized with real LangGraph (`StateGraph(BriefState)`, added to `pyproject.toml`) — a linear chain with a conditional error short-circuit after each node, matching §0.1 (typed state + deterministic sequencing, no agent conversation). `MarketScout`/`FixturePlanner` are kept sequential, not parallel (§2 note): the whole deterministic chain runs in <1s, so parallelism buys nothing yet.
+- 2026-07-10: the `input_hash` (§4) already mixes `curated_notes_version` + `euro_weeks_version`, but those curated tables are Layer-4 work that does not exist yet; both are placeholder constants in `graph/config.py`. When the real sources land and the constants change, every cached brief invalidates exactly once by design (documented at the constants).
