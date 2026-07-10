@@ -263,6 +263,40 @@ def test_all_players_validate_and_perf(real_assets):
     assert elapsed < 5.0, f"scoring took {elapsed:.2f}s (budget 5s)"
 
 
+# --- European-week rotation dampener (Layer 4 §1.2, config v1.4) ------------
+
+def _euro(team_id=1, gw=11, comp="UCL", imp=3):
+    return [{"team_id": team_id, "gameweek": gw, "competition": comp, "tie_importance": imp}]
+
+
+def _score_with_euro(minutes, euro, anchor=11):
+    fx = [fixture(1, anchor, 1, 2, hdiff=3)]
+    ctx = build_context([player()], TEAMS, fx, gameweeks(), mode="IN_SEASON",
+                        anchor=anchor, euro_weeks=euro)
+    return score_player(player(minutes=minutes, status="a"), ctx)
+
+
+def test_euro_dampens_rotation_risk_player():
+    """share < 0.85 + euro week -> minutes_prob dampened by EURO_ROTATION_DAMP[imp]."""
+    base = _score_with_euro(450, euro=None)            # share 0.5 -> mp 0.75, no euro
+    damp = _score_with_euro(450, euro=_euro(imp=3))    # imp 3 -> ×0.85
+    assert base.components["minutes_prob"] == pytest.approx(0.75, abs=1e-3)
+    assert damp.components["minutes_prob"] == pytest.approx(0.75 * 0.85, abs=1e-3)
+    assert "european_fixture_week:UCL:3" in damp.components["flags"]
+
+
+def test_euro_does_not_dampen_nailed_player_but_flags():
+    """share >= 0.85 -> NOT dampened, but the flag is still emitted."""
+    nailed = _score_with_euro(900, euro=_euro(imp=1))  # share 1.0
+    assert nailed.components["minutes_prob"] == pytest.approx(1.0, abs=1e-3)
+    assert "european_fixture_week:UCL:1" in nailed.components["flags"]
+
+
+def test_euro_flag_absent_without_euro_week():
+    r = _score_with_euro(450, euro=None)
+    assert not any(f.startswith("european_fixture_week") for f in r.components["flags"])
+
+
 # --- guards on the two intentional design choices --------------------------
 
 def test_clean_sheet_added_after_multipliers_not_scaled():

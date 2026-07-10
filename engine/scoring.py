@@ -50,6 +50,7 @@ class EngineContext:
     archive_by_id: dict = field(default_factory=dict)     # id -> archive row
     archive_by_namepos: dict = field(default_factory=dict)  # (full_name, pos) -> [rows]
     archive_season: str | None = None
+    euro_by_team_gw: dict = field(default_factory=dict)     # (team_id, gw) -> {competition, importance}
 
 
 def _xgi_per90(xgi, minutes) -> float:
@@ -58,7 +59,7 @@ def _xgi_per90(xgi, minutes) -> float:
 
 
 def build_context(players, teams, fixtures, gameweeks, *, config=DEFAULT_CONFIG,
-                  mode, anchor=None, archive=None) -> EngineContext:
+                  mode, anchor=None, archive=None, euro_weeks=None) -> EngineContext:
     teams_by_id = {t["id"]: t for t in teams}
 
     fixtures_by_team: dict = {}
@@ -89,10 +90,17 @@ def build_context(players, teams, fixtures, gameweeks, *, config=DEFAULT_CONFIG,
             )
     pos_xgi_fallback = {pos: median(v) for pos, v in pos_samples.items() if v}
 
+    euro_by_team_gw: dict = {}
+    for ew in (euro_weeks or []):
+        euro_by_team_gw[(ew["team_id"], ew["gameweek"])] = {
+            "competition": ew["competition"], "importance": ew["tie_importance"],
+        }
+
     ctx = EngineContext(
         config=config, mode=mode, anchor_gw=anchor, horizon_gws=horizon_gws,
         gws_elapsed=gws_elapsed, teams_by_id=teams_by_id,
         fixtures_by_team=fixtures_by_team, pos_xgi_fallback=pos_xgi_fallback,
+        euro_by_team_gw=euro_by_team_gw,
     )
 
     if archive:
@@ -332,6 +340,14 @@ def score_player(player, ctx: EngineContext) -> EPResult:
     if res.data_basis != "current":
         minutes_basis += f" ({res.data_basis})"
 
+    # European-week rotation dampener (§1.2): flag always; dampen minutes_prob only
+    # for non-nailed players (share < EURO_MIN_SHARE). Keyed on the anchor GW.
+    euro = ctx.euro_by_team_gw.get((player["team_id"], ctx.anchor_gw))
+    if euro:
+        mp_flags.append(f"european_fixture_week:{euro['competition']}:{euro['importance']}")
+        if res.minutes_share < cfg.EURO_MIN_SHARE:
+            minutes_prob *= cfg.EURO_ROTATION_DAMP.get(euro["importance"], 1.0)
+
     base, base_inputs = _base_pts(res, ctx)
     attack, attack_inputs = _attack_pts(res, position, ctx)
 
@@ -378,8 +394,9 @@ def score_player(player, ctx: EngineContext) -> EPResult:
 
 
 def score_all(players, teams, fixtures, gameweeks, *, config=DEFAULT_CONFIG,
-              mode, anchor=None, archive=None) -> list[EPResult]:
+              mode, anchor=None, archive=None, euro_weeks=None) -> list[EPResult]:
     """Score every player. Called by sync_fpl() step 6. Returns EPResult list."""
     ctx = build_context(players, teams, fixtures, gameweeks,
-                        config=config, mode=mode, anchor=anchor, archive=archive)
+                        config=config, mode=mode, anchor=anchor, archive=archive,
+                        euro_weeks=euro_weeks)
     return [score_player(p, ctx) for p in players]

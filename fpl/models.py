@@ -204,9 +204,12 @@ class Brief(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
-        # exactly one of fpl_team_id / draft_id is non-null
+        # Personalized briefs have exactly one owner; the generic weekly preview
+        # (Layer 4 §6) has NEITHER (fpl_team_id NULL AND draft_id NULL). So the only
+        # thing forbidden is BOTH being set.
         CheckConstraint(
-            "(fpl_team_id IS NULL) <> (draft_id IS NULL)", name="brief_exactly_one_owner"
+            "NOT (fpl_team_id IS NOT NULL AND draft_id IS NOT NULL)",
+            name="brief_not_both_owners",
         ),
         # unique(fpl_team_id, gameweek) where fpl_team_id not null
         Index(
@@ -225,6 +228,49 @@ class Brief(Base):
             sqlite_where=text("draft_id IS NOT NULL"),
             postgresql_where=text("draft_id IS NOT NULL"),
         ),
+        # the single generic preview per gameweek: unique(gameweek) where both NULL
+        Index(
+            "uq_brief_generic",
+            "gameweek",
+            unique=True,
+            sqlite_where=text("fpl_team_id IS NULL AND draft_id IS NULL"),
+            postgresql_where=text("fpl_team_id IS NULL AND draft_id IS NULL"),
+        ),
+    )
+
+
+class TeamNote(Base):
+    """Curated scouting notes (Layer 4 §1.1) — the moat table, maintained by hand.
+
+    One note per team (tactical identity, set pieces, rotation, pen takers). Its
+    max(updated_at) is `notes_version`, part of the brief cache key (Layer 3 §4).
+    """
+
+    __tablename__ = "team_notes"
+
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), primary_key=True)
+    note: Mapped[str] = mapped_column(Text)  # 2–3 lines
+    is_sample: Mapped[bool] = mapped_column(Boolean, default=False)  # seed rows for tests
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class EuropeanWeek(Base):
+    """Hand-maintained European fixture schedule (Layer 4 §1.2).
+
+    Feeds the Layer 2 rotation dampener and makes rotation hedging mandatory in the
+    Writer. max(updated_at) joins `notes_version` in the brief cache key.
+    """
+
+    __tablename__ = "european_weeks"
+
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), primary_key=True)
+    gameweek: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competition: Mapped[str] = mapped_column(Text)  # 'UCL' / 'UEL' / 'UECL'
+    tie_importance: Mapped[int] = mapped_column(SmallInteger)  # 1–3
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
 

@@ -19,8 +19,10 @@ from sqlalchemy import select
 
 from fpl.models import Brief
 
-from .config import CURATED_NOTES_VERSION, EURO_WEEKS_VERSION
-from .data import ep_config_version, load_ep_map, resolve_ep_anchor
+from .data import (
+    curated_notes_version, ep_config_version, euro_weeks_version, load_ep_map,
+    resolve_ep_anchor,
+)
 from .deps import Deps
 from .nodes.squad_analyst import resolve_squad
 from .nodes.writer import STUB_MODEL
@@ -30,15 +32,16 @@ from .graph import run_brief
 log = logging.getLogger("graph.cache")
 
 
-def compute_input_hash(squad, gameweek_anchor: int, ep_cfg_version: str) -> str:
+def compute_input_hash(squad, gameweek_anchor: int, ep_cfg_version: str,
+                       notes_version: str, euro_version: str) -> str:
     payload = {
         "picks": sorted((pk.player_id, pk.multiplier) for pk in squad.picks),
         "captain": next((pk.player_id for pk in squad.picks if pk.is_captain), None),
         "bank": round(squad.bank, 1),
         "ep_config_version": ep_cfg_version,
         "gameweek_anchor": gameweek_anchor,
-        "curated_notes_version": CURATED_NOTES_VERSION,
-        "euro_weeks_version": EURO_WEEKS_VERSION,
+        "curated_notes_version": notes_version,
+        "euro_weeks_version": euro_version,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -58,7 +61,9 @@ def get_or_generate(state: BriefState, deps: Deps, *, run_fn=run_brief):
     with deps.session_factory() as session:
         anchor = resolve_ep_anchor(session)
         ep_cfg = ep_config_version(load_ep_map(session, anchor)) if anchor else "unknown"
-        input_hash = compute_input_hash(squad, state.request.gameweek_anchor, ep_cfg)
+        input_hash = compute_input_hash(
+            squad, state.request.gameweek_anchor, ep_cfg,
+            curated_notes_version(session), euro_weeks_version(session))
 
         cached = session.scalars(
             select(Brief).where(Brief.input_hash == input_hash)

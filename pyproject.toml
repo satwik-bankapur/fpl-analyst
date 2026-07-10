@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-dateutil>=2.9",
     "langgraph>=0.2",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["fpl*", "engine*", "graph*"]
+include = ["fpl*", "engine*", "graph*", "writer*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
