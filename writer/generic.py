@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from fpl.models import Gameweek, TeamNote
 
+from graph.config import DIFFERENTIAL_MAX_OWNERSHIP, TEMPLATE_MIN_OWNERSHIP
 from graph.data import (
     load_ep_map, load_fixtures, load_players, load_teams, resolve_ep_anchor,
 )
@@ -21,10 +22,7 @@ from graph.fixtures_util import (
     DEFAULT_HORIZON, blanks_and_doubles, swing_score, team_next_fixtures,
 )
 
-from .config import (
-    DIFFERENTIAL_MAX_OWNERSHIP, PREVIEW_DIFFERENTIALS, PREVIEW_TOP_EP,
-    TEMPLATE_MIN_OWNERSHIP,
-)
+from .config import PREVIEW_DIFFERENTIALS, PREVIEW_TOP_EP
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 _OK = {"a", "d"}

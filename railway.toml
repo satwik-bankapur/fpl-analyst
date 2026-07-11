@@ -1,0 +1,21 @@
+# Railway deployment (spec §5). ONE service, ONE replica — hard requirement.
+#
+# The FastAPI process runs APScheduler in-process (RUN_SCHEDULER=true). A second
+# replica would double every sync AND every email to paying customers. numReplicas
+# MUST stay 1. If throughput ever demands horizontal scale, extract the scheduler
+# into its own single-instance worker service FIRST, then the web tier can scale.
+#
+# Required env vars (set in the Railway dashboard, never committed):
+#   FPL_DATABASE_URL (= spec's DATABASE_URL), RUN_SCHEDULER=true, FRONTEND_ORIGIN,
+#   ADMIN_TOKEN, RESEND_API_KEY, SEND_FROM.
+#   Stage B adds: BRIEF_TOKEN_SECRET, PADDLE_* , LLM_API_KEY/LLM_MODEL.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -m fpl init-db && uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+numReplicas = 1
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+healthcheckPath = "/api/health"
