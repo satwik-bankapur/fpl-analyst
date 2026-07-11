@@ -12,6 +12,8 @@ dependencies = [
     "python-dateutil>=2.9",
     "langgraph>=0.2",
     "anthropic>=0.40",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +28,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["fpl*", "engine*", "graph*", "writer*"]
+include = ["fpl*", "engine*", "graph*", "writer*", "api*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

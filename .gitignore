@@ -19,6 +19,7 @@ Thumbs.db
 # Local Claude Code working dir + ad-hoc scratch/working scripts
 # (keep `git add -A` from sweeping local tooling into commits)
 .claude/
+.playwright-mcp/
 check_squad.py
 scratch/
 scratch_*.py

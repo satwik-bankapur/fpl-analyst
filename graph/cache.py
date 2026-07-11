@@ -47,12 +47,16 @@ def compute_input_hash(squad, gameweek_anchor: int, ep_cfg_version: str,
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def get_or_generate(state: BriefState, deps: Deps, *, run_fn=run_brief):
+def get_or_generate(state: BriefState, deps: Deps, *, run_fn=run_brief,
+                    before_generate=None):
     """Return (BriefState, cache_hit: bool).
 
     On a fatal squad-resolution error we still run the graph so the error
     responder produces a user-facing message — errors are not cached.
     `run_fn` is injectable so tests can spy on how many times the graph ran.
+    `before_generate` (Layer 5) is a no-arg callback invoked ONLY on a genuine
+    cache miss, right before the graph runs — never on cache hits or the error
+    path. It may raise to abort generation (e.g. the per-IP rate limiter).
     """
     squad, err = resolve_squad(state, deps)
     if err is not None or squad is None:
@@ -73,6 +77,8 @@ def get_or_generate(state: BriefState, deps: Deps, *, run_fn=run_brief):
             state.brief_md = cached.brief_md
             return state, True
 
+    if before_generate is not None:
+        before_generate()
     final = run_fn(state, deps)
     if final.error is None and final.brief_md:
         _persist(deps, state, final, input_hash)
