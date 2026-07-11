@@ -9,13 +9,12 @@ the real version source and the cache will invalidate exactly once.
 """
 from __future__ import annotations
 
-# Placeholder content-version tags (see module docstring). Bump only when the
-# real curated sources arrive.
-# NOTE for future-us: when the real team_notes / european_weeks tables land in
-# Layer 4 and these constants change, EVERY cached brief invalidates exactly once
-# (the hash shifts for all rows). That mass cache miss is by design, not a bug.
-CURATED_NOTES_VERSION = "notes-v0-placeholder"
-EURO_WEEKS_VERSION = "euro-v0-placeholder"
+# Content-version tags for the cache key are now REAL sources: max(updated_at) of
+# team_notes / european_weeks, resolved from the DB in graph.data
+# (curated_notes_version / euro_weeks_version). The former placeholder constants
+# are gone. NOTE for future-us: the first time either curated table is populated
+# (or an existing row is edited), the version string changes and EVERY cached brief
+# invalidates exactly once — that mass cache miss is by design, not a bug.
 
 # Detection thresholds for SquadAnalyst.Diagnosis (§2.1). No magic numbers inline.
 FIXTURE_CLIFF_SWING = -0.8      # team swing below this => fixture_cliff problem

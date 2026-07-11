@@ -1,0 +1,102 @@
+[HEADER]
+team: Draft Squad
+mode: PRESEASON
+gameweek_anchor: 1
+bank: £0.0m
+squad_value: £59.9m
+free_transfers: 1 (assumed)
+squad_ep_gw: 3.6
+squad_ep_next4: 16.6
+
+[SQUAD]
+XI Valdimarsson [GK BRE £3.8] ep 0.8 ep4 3.4 (C)
+XI Clarke [DEF ARS £3.7] ep 0.3 ep4 1.9
+XI Nichols [DEF ARS £3.7] ep 0.3 ep4 1.9
+XI Acheampong [DEF CHE £3.7] ep 0.6 ep4 2.2
+XI Byram [DEF LEE £3.7] ep 0.6 ep4 1.7
+XI Dowman [MID ARS £4.2] ep 0.1 ep4 0.5
+XI Trésor [MID BUR £4.3] ep 0.1 ep4 0.5
+XI D.Essugo [MID CHE £4.3] ep 0.1 ep4 0.6
+XI Agbinone [MID CRY £4.3] ep 0.1 ep4 0.5
+XI Marc Guiu [FWD CHE £4.0] ep 0.0 ep4 0.0
+XI Barnes [FWD BUR £4.2] ep 0.0 ep4 0.0
+BENCH Slonina [GK CHE £3.8] ep 0.9 ep4 3.6
+BENCH Nallo [DEF LIV £3.7] ep 0.6 ep4 2.1
+BENCH Devenny [MID CRY £4.3] ep 0.1 ep4 0.5
+BENCH Obi [FWD MUN £4.2] ep 0.0 ep4 0.0
+
+[EVIDENCE]
+- Valdimarsson [GK BRE £3.8] ep 0.8 ep4 3.4
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Trésor [MID BUR £4.3] ep 0.1 ep4 0.5
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Barnes [FWD BUR £4.2] ep 0.0 ep4 0.0
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Acheampong [DEF CHE £3.7] ep 0.6 ep4 2.2
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Moore [GK SUN £3.9] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Roefs [GK SUN £4.8] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Ellborg [GK SUN £4.0] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[BENCH_EVIDENCE]
+- Slonina [GK CHE £3.8] ep 0.9 ep4 3.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Devenny [MID CRY £4.3] ep 0.1 ep4 0.5
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Nallo [DEF LIV £3.7] ep 0.6 ep4 2.1
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Obi [FWD MUN £4.2] ep 0.0 ep4 0.0
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[PROBLEMS]
+- fixture_cliff (sev2) Trésor: swing:-1; team:BUR
+- fixture_cliff (sev2) Barnes: swing:-1; team:BUR
+- dead_bench_spot (sev1) Slonina: ep_next4:3.6
+- dead_bench_spot (sev1) Nallo: ep_next4:2.07
+- dead_bench_spot (sev1) Devenny: ep_next4:0.48
+- dead_bench_spot (sev1) Obi: ep_next4:0.0
+
+[DECISIONS]
+transfer: ROLL
+transfer_reasoning_codes: no_qualifying_delta
+captain: Valdimarsson  vice: Acheampong
+captain_differential_note: vice (233) is within 0.2 ep of the captain and only 1.8% owned — a differential captaincy option
+bench_order: Slonina, Nallo, Devenny, Obi
+chip_stance: hold
+watchlist: Moore, Roefs, Ellborg
+reasoning_codes: transfer:roll, captain_ep:0.78, swing_team:11
+
+[FIXTURES]
+- BRE swing -0.3: NFO(A,3) AVL(H,3) SUN(A,3) CHE(H,3) FUL(A,3) MUN(H,4)
+- CHE swing -0.7: CRY(H,3) WHU(A,3) FUL(H,2) BRE(A,3) MUN(A,4) BHA(H,3)
+- SUN swing -0.7: WHU(H,2) BUR(A,2) BRE(H,3) CRY(A,3) AVL(H,3) NFO(A,3)
+entering_good_run: LEE
+leaving_good_run: BUR, MUN
+
+[FIXTURES_OTHER]
+- ARS swing 0.0: MUN(A,4) LEE(H,2) LIV(A,4) NFO(H,3) MCI(H,4) NEW(A,3)
+- BUR swing -1.0: TOT(A,3) SUN(H,2) MUN(A,4) LIV(H,4) NFO(H,3) MCI(A,5)
+- CRY swing 0.7: CHE(A,4) NFO(H,3) AVL(A,4) SUN(H,2) WHU(A,3) LIV(H,4)
+- LEE swing 1.0: EVE(H,3) ARS(A,5) NEW(H,3) FUL(A,3) WOL(A,2) BOU(H,3)
+- LIV swing 0.7: BOU(H,3) NEW(A,3) ARS(H,4) BUR(A,2) EVE(H,3) CRY(A,3)
+- MUN swing -1.0: ARS(H,4) FUL(A,3) BUR(H,1) MCI(A,5) CHE(H,3) BRE(A,3)
+
+[TEAM_NOTES]
+
+[WARNINGS]
+- free_transfers_assumed
+- sale_price_approximated

@@ -1,0 +1,100 @@
+[HEADER]
+team: Draft Squad
+mode: PRESEASON
+gameweek_anchor: 1
+bank: £0.0m
+squad_value: £107.2m
+free_transfers: 1 (assumed)
+squad_ep_gw: 3.5
+squad_ep_next4: 16.6
+
+[SQUAD]
+XI Raya [GK ARS £6.2] ep 0.6 ep4 3.3 (C)
+XI Gabriel [DEF ARS £7.3] ep 0.3 ep4 1.9
+XI Guéhi [DEF MCI £5.1] ep 0.7 ep4 1.9
+XI Virgil [DEF LIV £6.1] ep 0.6 ep4 2.1
+XI Senesi [DEF BOU £5.2] ep 0.3 ep4 2.2
+XI B.Fernandes [MID MUN £10.4] ep 0.1 ep4 0.5
+XI Semenyo [MID MCI £8.0] ep 0.2 ep4 0.5
+XI Rice [MID ARS £7.2] ep 0.1 ep4 0.5
+XI Rogers [MID AVL £7.3] ep 0.1 ep4 0.5
+XI Haaland [FWD MCI £14.7] ep 0.0 ep4 0.0
+XI João Pedro [FWD CHE £7.4] ep 0.0 ep4 0.0
+BENCH Dúbravka [GK BUR £4.0] ep 0.8 ep4 3.3
+BENCH O'Reilly [DEF MCI £5.3] ep 0.7 ep4 1.9
+BENCH Wilson [MID FUL £5.8] ep 0.1 ep4 0.4
+BENCH Thiago [FWD BRE £7.2] ep 0.0 ep4 0.0
+
+[EVIDENCE]
+- Raya [GK ARS £6.2] ep 0.6 ep4 3.3
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Guéhi [DEF MCI £5.1] ep 0.7 ep4 1.9
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- B.Fernandes [MID MUN £10.4] ep 0.1 ep4 0.5
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Moore [GK SUN £3.9] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Roefs [GK SUN £4.8] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Ellborg [GK SUN £4.0] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[BENCH_EVIDENCE]
+- Thiago [FWD BRE £7.2] ep 0.0 ep4 0.0
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Wilson [MID FUL £5.8] ep 0.1 ep4 0.4
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- O'Reilly [DEF MCI £5.3] ep 0.7 ep4 1.9
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Dúbravka [GK BUR £4.0] ep 0.8 ep4 3.3
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[PROBLEMS]
+- fixture_cliff (sev2) B.Fernandes: swing:-1.0; team:MUN
+- dead_bench_spot (sev1) Dúbravka: ep_next4:3.26
+- dead_bench_spot (sev1) O'Reilly: ep_next4:1.9
+- dead_bench_spot (sev1) Wilson: ep_next4:0.43
+- dead_bench_spot (sev1) Thiago: ep_next4:0.0
+
+[DECISIONS]
+transfer: ROLL
+transfer_reasoning_codes: no_qualifying_delta
+captain: Guéhi  vice: Raya
+bench_order: Dúbravka, O'Reilly, Wilson, Thiago
+chip_stance: hold
+watchlist: Moore, Roefs, Ellborg
+reasoning_codes: transfer:roll, captain_ep:0.65, swing_team:10
+
+[FIXTURES]
+- ARS swing 0.0: MUN(A,4) LEE(H,2) LIV(A,4) NFO(H,3) MCI(H,4) NEW(A,3)
+- MCI swing -0.3: WOL(A,2) TOT(H,3) BHA(A,4) MUN(H,4) ARS(A,5) BUR(H,1)
+- SUN swing -0.7: WHU(H,2) BUR(A,2) BRE(H,3) CRY(A,3) AVL(H,3) NFO(A,3)
+entering_good_run: FUL
+leaving_good_run: BUR, MUN
+
+[FIXTURES_OTHER]
+- AVL swing 0.3: NEW(H,3) BRE(A,3) CRY(H,3) EVE(A,3) SUN(A,3) FUL(H,2)
+- BUR swing -1.0: TOT(A,3) SUN(H,2) MUN(A,4) LIV(H,4) NFO(H,3) MCI(A,5)
+- BOU swing -0.3: LIV(A,4) WOL(H,1) TOT(A,3) BHA(H,3) NEW(H,3) LEE(A,3)
+- BRE swing -0.3: NFO(A,3) AVL(H,3) SUN(A,3) CHE(H,3) FUL(A,3) MUN(H,4)
+- CHE swing -0.7: CRY(H,3) WHU(A,3) FUL(H,2) BRE(A,3) MUN(A,4) BHA(H,3)
+- FUL swing 1.0: BHA(A,4) MUN(H,4) CHE(A,4) LEE(H,2) BRE(H,3) AVL(A,4)
+- LIV swing 0.7: BOU(H,3) NEW(A,3) ARS(H,4) BUR(A,2) EVE(H,3) CRY(A,3)
+- MUN swing -1.0: ARS(H,4) FUL(A,3) BUR(H,1) MCI(A,5) CHE(H,3) BRE(A,3)
+
+[TEAM_NOTES]
+- ARS: Sample: Set-piece threat is elite — defenders carry real goal upside. Saka is first-choice pen taker when on the pitch.
+- MCI: Sample: Haaland aside, rotation is heavy in cup/European weeks. Full-backs invert, so attacking returns skew to midfielders.
+
+[WARNINGS]
+- free_transfers_assumed

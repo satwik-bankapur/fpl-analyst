@@ -20,6 +20,7 @@ from .client import FPLClient
 from .errors import FPLError, SyncAborted
 from .models import (
     EpScore,
+    EuropeanWeek,
     Fixture,
     Gameweek,
     Meta,
@@ -252,9 +253,14 @@ def sync_fpl(client: FPLClient | None = None, session_factory=SessionLocal) -> S
                 # STEP 6 — recompute ep_scores via the Layer 2 engine (table rewrite).
                 mode = derive_mode(session)
                 archive_rows = _load_archive(session)
+                euro_weeks = [
+                    {"team_id": e.team_id, "gameweek": e.gameweek,
+                     "competition": e.competition, "tie_importance": e.tie_importance}
+                    for e in session.scalars(select(EuropeanWeek)).all()
+                ]
                 results = score_all(
                     players, teams, fixtures, gameweeks,
-                    mode=mode, anchor=anchor, archive=archive_rows,
+                    mode=mode, anchor=anchor, archive=archive_rows, euro_weeks=euro_weeks,
                 )
                 ep_rows = [r.to_row() for r in results]
                 session.execute(delete(EpScore))

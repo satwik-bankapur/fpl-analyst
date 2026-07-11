@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from fpl.models import DraftSquad, EpScore, Fixture, Gameweek, Player, Team
+from fpl.models import (
+    DraftSquad, EpScore, EuropeanWeek, Fixture, Gameweek, Player, Team, TeamNote,
+)
 
 
 def _f(x) -> float:
@@ -73,6 +75,18 @@ def load_draft_squad(session, draft_id: UUID) -> dict | None:
     if row is None:
         return None
     return {"id": row.id, "player_ids": list(row.player_ids), "captain_id": row.captain_id}
+
+
+def curated_notes_version(session) -> str:
+    """`notes_version` = max(team_notes.updated_at) (Layer 4 §1.1). 'none' if empty."""
+    v = session.scalar(select(func.max(TeamNote.updated_at)))
+    return v.isoformat() if v is not None else "none"
+
+
+def euro_weeks_version(session) -> str:
+    """max(european_weeks.updated_at) (Layer 4 §1.2). 'none' if empty."""
+    v = session.scalar(select(func.max(EuropeanWeek.updated_at)))
+    return v.isoformat() if v is not None else "none"
 
 
 def ep_config_version(ep_map: dict[int, dict]) -> str:

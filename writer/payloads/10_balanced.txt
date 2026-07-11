@@ -1,0 +1,87 @@
+[HEADER]
+team: Draft Squad
+mode: PRESEASON
+gameweek_anchor: 1
+bank: £0.0m
+squad_value: £78.6m
+free_transfers: 1 (assumed)
+squad_ep_gw: 6.2
+squad_ep_next4: 19.9
+
+[SQUAD]
+XI Roefs [GK SUN £4.8] ep 1.1 ep4 3.8 (C)
+XI Ballard [DEF SUN £4.6] ep 0.8 ep4 2.5
+XI Hume [DEF SUN £4.5] ep 0.8 ep4 2.5
+XI Mukiele [DEF SUN £4.6] ep 0.8 ep4 2.5
+XI Geertruida [DEF SUN £4.5] ep 0.8 ep4 2.5
+XI Diarra [MID SUN £5.3] ep 0.2 ep4 0.6
+XI Aleksić [MID SUN £4.9] ep 0.2 ep4 0.6
+XI E.Le Fée [MID SUN £4.8] ep 0.2 ep4 0.6
+XI Poveda [MID SUN £4.7] ep 0.2 ep4 0.6
+XI Havertz [FWD ARS £7.3] ep 0.0 ep4 0.0
+XI G.Jesus [FWD ARS £6.4] ep 0.0 ep4 0.0
+BENCH Sánchez [GK CHE £4.8] ep 0.9 ep4 3.6
+BENCH Cucurella [DEF CHE £6.1] ep 0.6 ep4 2.2
+BENCH Rigg [MID SUN £4.7] ep 0.2 ep4 0.6
+BENCH Evanilson [FWD BOU £6.6] ep 0.0 ep4 0.0
+
+[EVIDENCE]
+- Jörgensen [GK CHE £4.3] ep 0.9 ep4 3.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Slonina [GK CHE £3.8] ep 0.9 ep4 3.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Ballard [DEF SUN £4.6] ep 0.8 ep4 2.5
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Roefs [GK SUN £4.8] ep 1.1 ep4 3.8
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Merrick [GK CHE £4.0] ep 0.9 ep4 3.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[BENCH_EVIDENCE]
+- Evanilson [FWD BOU £6.6] ep 0.0 ep4 0.0
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Sánchez [GK CHE £4.8] ep 0.9 ep4 3.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Cucurella [DEF CHE £6.1] ep 0.6 ep4 2.2
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+- Rigg [MID SUN £4.7] ep 0.2 ep4 0.6
+    basis: baseline_fallback  minutes_prob: 0.8  base: 0.0  attack: 0.0
+    flags: no_history_fallback
+
+[PROBLEMS]
+- dead_bench_spot (sev1) Sánchez: ep_next4:3.6
+- dead_bench_spot (sev1) Cucurella: ep_next4:2.24
+- dead_bench_spot (sev1) Rigg: ep_next4:0.61
+- dead_bench_spot (sev1) Evanilson: ep_next4:0.0
+
+[DECISIONS]
+transfer: ROLL
+transfer_reasoning_codes: no_qualifying_delta
+captain: Roefs  vice: Ballard
+captain_differential_note: vice (531) is within 0.34 ep of the captain and only 2.4% owned — a differential captaincy option
+bench_order: Sánchez, Cucurella, Rigg, Evanilson
+chip_stance: hold
+watchlist: Jörgensen, Slonina, Merrick
+reasoning_codes: transfer:roll, captain_ep:1.12
+
+[FIXTURES]
+- CHE swing -0.7: CRY(H,3) WHU(A,3) FUL(H,2) BRE(A,3) MUN(A,4) BHA(H,3)
+- SUN swing -0.7: WHU(H,2) BUR(A,2) BRE(H,3) CRY(A,3) AVL(H,3) NFO(A,3)
+leaving_good_run: MUN
+
+[FIXTURES_OTHER]
+- ARS swing 0.0: MUN(A,4) LEE(H,2) LIV(A,4) NFO(H,3) MCI(H,4) NEW(A,3)
+- BOU swing -0.3: LIV(A,4) WOL(H,1) TOT(A,3) BHA(H,3) NEW(H,3) LEE(A,3)
+
+[TEAM_NOTES]
+
+[WARNINGS]
+- free_transfers_assumed

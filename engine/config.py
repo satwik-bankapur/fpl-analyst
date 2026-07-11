@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class HeuristicConfig:
-    config_version: str = "v1.3"
+    config_version: str = "v1.4"
 
     # base/attack blend and their internal weights
     W_BASE: float = 0.5
@@ -56,6 +56,12 @@ class HeuristicConfig:
     # early-season blending
     EARLY_SEASON_GW: int = 4
     EARLY_SHARE_FLOOR: float = 0.7
+
+    # European-week rotation dampener (Layer 4 §1.2). Applied to minutes_prob ONLY
+    # where minutes share < EURO_MIN_SHARE; the european_fixture_week flag is emitted
+    # for the team's players regardless of share.
+    EURO_ROTATION_DAMP: dict = field(default_factory=lambda: {1: 0.90, 2: 0.90, 3: 0.85})
+    EURO_MIN_SHARE: float = 0.85
 
     def fdr_mult(self, fdr: int) -> float:
         return self.FDR_TABLE.get(fdr, 1.0)
