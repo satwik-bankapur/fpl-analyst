@@ -154,3 +154,53 @@ these record where the code diverges and why.
 - **Fixed a merged Layer 4 bug.** `writer/generic.py` imported `DIFFERENTIAL_MAX_OWNERSHIP` / `TEMPLATE_MIN_OWNERSHIP` from `writer.config`, where they don't exist (the module was never imported by a test, so the broken import shipped green in f96ad2d). They now come from `graph.config` — the single source shared with `market_scout`.
 - **`GET /api/brief/{team_id}/{gw}` is a pure read in Stage A.** No season briefs are generated and no tokens are minted this stage, so it only serves an already-persisted brief (free view); header fields are null until the Stage B send job supplies squad context. Token gating / full-view unlock is Stage B.
 - **Stage B TODO — persist the generic preview.** `GET /api/preview` renders the generic stub **live** on each request (behind `Cache-Control`), with no persisted `briefs` singleton row. The Stage B weekly send job (template 2, §3) needs a persisted preview to email — so persisting the generic singleton (the relaxed-CHECK row from migration `b2c3d4e5f6a7`) is Stage B scope, flagged here so it isn't rediscovered mid-batch.
+
+**2026-07-15 — Free-tier deployment topology is the Stage A launch configuration.**
+
+Railway now requires a paid plan, so §5's topology is **deferred, not abandoned**. The launch
+config is Render (free) + Neon (free) + GitHub Actions cron + Vercel + Resend, documented
+step-by-step in `docs/deploy-stage-a-free.md`. `docs/deploy-stage-a.md` (Railway) is preserved
+verbatim as the upgrade path — the free runbook's §9 maps each paid step to the pain it fixes.
+The §5 spec above still describes the *intended* topology; this note records what launch
+actually runs on.
+
+- **The scheduler moved out of the process — the one architecturally load-bearing change.**
+  §5 (and `fpl/scheduler.py`) put APScheduler in-process on a single replica. A Render free
+  service **sleeps after ~15 min idle**, so an in-process scheduler cannot survive between
+  requests. Sync therefore becomes an external cron: `.github/workflows/sync.yml` calls the
+  new `POST /api/admin/sync`. `RUN_SCHEDULER` stays **default-off** in this mode (it is not
+  set on Render at all) — so the free topology is `RUN_SCHEDULER` unset + external cron, and
+  the paid topology is `RUN_SCHEDULER=true` + no cron. **Never both:** two sync drivers on one
+  DB is the duplicate-sync failure the single-replica invariant exists to prevent. The
+  invariant itself is *unchanged and still holds* — with the scheduler off, the "one replica"
+  rule is no longer what protects against double-syncing; the cron's `concurrency: fpl-sync`
+  group and the single-cron-source rule are. Restoring the paid path is config-only
+  (`RUN_SCHEDULER=true`, drop the workflow), never a code change.
+- **New route `POST /api/admin/sync`** (additive to §1.9's admin surface). Bearer `ADMIN_TOKEN`,
+  same `_require_admin` guard as the other admin endpoints; calls the existing `sync_fpl()`
+  through `service.run_sync()` and returns `SyncResult` as JSON so the cron log shows what
+  landed (`mode`, `players_updated`, `ep_rows`, `rollover`, `duration_s`). It runs the sync
+  **inline** — a slow (~minutes) request by design, since the caller is a cron, not a browser.
+  `FPLError` (incl. `SyncAborted`) maps to **503 `{"error":"sync_aborted"}`** rather than a
+  500, so the workflow fails loudly; abort-or-nothing is untouched (a failed fetch leaves the
+  DB exactly as it was). The route is safe to keep in the paid topology as a manual
+  "sync now" — it was previously Railway's shell, which the Render free tier doesn't offer.
+- **Sync cadence downgraded to flat twice-daily.** Layer 1 §3 wants daily (pre-season) →
+  twice-daily (baseline) → **3-hourly inside deadline−48h**; GitHub cron can't derive the
+  deadline window from the DB. Twice-daily *exceeds* what pre-season needs (§3 wants daily
+  there), so Stage A is unaffected; it becomes wrong at the GW1 deadline, which is the
+  Stage B / paid-instance boundary anyway. `fpl/scheduler.py` retains the full deadline-aware
+  implementation — nothing was deleted, and flipping `RUN_SCHEDULER=true` restores it.
+- **No custom domain at launch.** §5 assumes `yourdomain.com` + `api.yourdomain.com`. Launch
+  runs on `*.vercel.app` + `*.onrender.com`; `FRONTEND_ORIGIN` must be the exact Vercel
+  production origin. Consequence: Vercel **preview deployments get distinct hostnames and will
+  fail CORS** against the live API (single-origin allow-list, §5) — expected, not a bug.
+- **Backups are a genuine gap, not a deferral.** §5 says take automated daily backups because
+  `players_archive`/`briefs` are irreplaceable. Neon free has no scheduled backups (~24h PITR
+  only). Accepted for Stage A because the DB is rebuildable from a sync — **but only until the
+  first season rollover archives last season**, after which it is not. Flagged in
+  `deploy-stage-a-free.md` §2.5 and §9 as the hard deadline for the paid upgrade.
+- **Email is degraded without a domain.** Resend's shared `resend.dev` test sender only
+  delivers to your own verified address, so real signups can't receive the welcome mail until
+  a domain is verified. The unkeyed no-op path (`RESEND_API_KEY` empty) remains the honest
+  free-launch default.

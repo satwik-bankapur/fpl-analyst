@@ -9,6 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from fpl.errors import FPLError
 from graph.deps import Deps
 
 from . import mail, service
@@ -175,3 +176,17 @@ def admin_euro_weeks(body: EuroWeekRequest, _: None = Depends(_require_admin),
     service.upsert_euro_week(deps, body.team_id, body.gameweek,
                              body.competition, body.tie_importance)
     return {"ok": True}
+
+
+@router.post("/admin/sync")
+def admin_sync(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    """External cron entry point for the free-tier topology (no in-process scheduler).
+
+    Runs the sync inline — it is slow (fetch + score ~700 players) by design: the
+    caller is a GitHub Actions cron, not a browser. A data-layer failure surfaces
+    as 503 so the cron job fails loudly rather than reporting a phantom success.
+    """
+    try:
+        return service.run_sync(deps)
+    except FPLError as e:
+        raise HTTPException(status_code=503, detail={"error": e.code})

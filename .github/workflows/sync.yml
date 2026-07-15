@@ -1,0 +1,52 @@
+# Free-tier sync cron — the external replacement for the in-process APScheduler.
+#
+# WHY THIS EXISTS: the paid topology runs APScheduler inside the API process
+# (RUN_SCHEDULER=true, single Railway replica). Render's free tier sleeps the
+# service after ~15 min idle, so an in-process scheduler simply stops existing
+# between requests. This workflow calls POST /api/admin/sync instead.
+#
+# CADENCE: Layer 1 §3 wants daily (pre-season) -> twice daily (in-season) ->
+# every 3h inside the deadline-48h window. GitHub cron can't derive the deadline
+# window, so the free-tier launch runs a flat TWICE DAILY. Upgrading to the
+# deadline-aware cadence is a Stage B / paid-tier item (see docs/deploy-stage-a-free.md §6).
+#
+# Requires two repo secrets: API_BASE_URL, ADMIN_TOKEN.
+
+name: sync
+
+on:
+  schedule:
+    # 06:00 and 18:00 UTC. GitHub cron is best-effort and can lag by several
+    # minutes under load — sync has no deadline-critical timing at this cadence.
+    - cron: "0 6,18 * * *"
+  workflow_dispatch: {}   # manual "sync now" button
+
+concurrency:
+  # Never let a slow sync overlap the next tick: sync_fpl writes in one
+  # transaction, and two concurrent runs would just contend for the same rows.
+  group: fpl-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake the service (free tier sleeps after ~15 min idle)
+        # Cold start can take ~1 min. Health is cheap and un-authenticated; hitting
+        # it first means the real sync call isn't paying the boot cost inside its
+        # own timeout. --fail is deliberately absent: waking is best-effort.
+        run: |
+          curl -sS --max-time 180 --retry 3 --retry-all-errors --retry-delay 15 \
+            "${{ secrets.API_BASE_URL }}/api/health" || echo "wake ping failed; syncing anyway"
+
+      - name: Trigger sync
+        run: |
+          code=$(curl -sS -o body.json -w '%{http_code}' \
+            --max-time 600 \
+            -X POST "${{ secrets.API_BASE_URL }}/api/admin/sync" \
+            -H "Authorization: Bearer ${{ secrets.ADMIN_TOKEN }}")
+          echo "HTTP $code"; cat body.json; echo
+          # Any non-200 fails the job on purpose: a silent sync failure means the
+          # DB quietly goes stale, which is worse than a red run in the Actions tab.
+          [ "$code" = "200" ]

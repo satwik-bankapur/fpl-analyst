@@ -7,6 +7,7 @@ engine formula — the deterministic/LLM boundary holds at the delivery layer to
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -15,7 +16,7 @@ from fpl.db import SessionLocal
 from fpl.models import (
     Brief, DraftSquad, EmailSignup, EpScore, EuropeanWeek, Player, TeamNote,
 )
-from fpl.sync import derive_mode, next_gameweek
+from fpl.sync import derive_mode, next_gameweek, sync_fpl
 from graph.cache import get_or_generate
 from graph.data import load_teams
 from graph.deps import Deps
@@ -217,6 +218,18 @@ def health(deps: Deps) -> dict:
         "next_gw": ng.id if ng else None,
         "next_deadline": ng.deadline.isoformat() if ng else None,
     }
+
+
+def run_sync(deps: Deps) -> dict:
+    """Run `sync_fpl()` synchronously and return its SyncResult as JSON.
+
+    The free-tier deployment has no in-process scheduler (a sleeping Render free
+    service can't hold APScheduler), so an external cron calls this behind
+    ADMIN_TOKEN instead. `deps.client=None` in prod => sync_fpl builds and closes
+    a real FPLClient; tests inject the frozen-asset fake. Sync stays
+    abort-or-nothing: a failed fetch raises and leaves the DB untouched.
+    """
+    return asdict(sync_fpl(client=deps.client, session_factory=deps.session_factory))
 
 
 def signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> None:

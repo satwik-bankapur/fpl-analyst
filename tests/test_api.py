@@ -20,11 +20,12 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from engine.scoring import score_all
+from fpl.errors import FPLApiError
 from fpl.models import Base, EpScore, EuropeanWeek, Fixture, Gameweek, Player, Team, TeamNote
 from fpl.models import EmailSignup
 from fpl.sync import sync_fpl
@@ -85,6 +86,17 @@ def golden_sf():
     SF = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     sync_fpl(client=FullFakeClient(), session_factory=SF)
     yield SF
+    engine.dispose()
+
+
+@pytest.fixture
+def empty_sf():
+    """Migrated-but-empty DB — the state a fresh free-tier Neon deploy is in
+    before the first cron sync lands."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool, future=True)
+    Base.metadata.create_all(engine)
+    yield sessionmaker(bind=engine, expire_on_commit=False, future=True)
     engine.dispose()
 
 
@@ -221,6 +233,53 @@ def test_admin_notes_requires_token(golden_sf, client_for, monkeypatch):
     assert ok.status_code == 200
     with golden_sf() as s:
         assert s.get(TeamNote, 1).note == "Set-piece routine changed."
+
+
+# ===========================================================================
+# Admin sync (free-tier topology): the external-cron replacement for the
+# in-process APScheduler, which a sleeping Render free service can't hold.
+# ===========================================================================
+
+def _ep_count(SF) -> int:
+    with SF() as s:
+        return s.scalar(select(func.count()).select_from(EpScore))
+
+
+def test_admin_sync_requires_token_and_populates_db(empty_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(empty_sf, FullFakeClient())
+
+    assert client.post("/api/admin/sync").status_code == 401
+    assert _ep_count(empty_sf) == 0            # the rejected call synced nothing
+
+    r = client.post("/api/admin/sync", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "IN_SEASON" and body["ep_rows"] > 100
+    assert _ep_count(empty_sf) == body["ep_rows"]   # the reported count is the real one
+
+
+def test_admin_sync_upstream_failure_is_503_and_leaves_db_untouched(
+        empty_sf, client_for, monkeypatch):
+    """Stale beats broken: a failed fetch must abort without writing, and must
+    fail loudly (503) so the cron job doesn't log a phantom success."""
+    monkeypatch.setattr(settings, "admin_token", "secret")
+
+    class DownClient:
+        def get_bootstrap(self):
+            raise FPLApiError("upstream 503")
+
+        def get_fixtures(self):
+            raise FPLApiError("upstream 503")
+
+        def close(self):
+            pass
+
+    r = client_for(empty_sf, DownClient()).post(
+        "/api/admin/sync", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "sync_aborted"
+    assert _ep_count(empty_sf) == 0
 
 
 # ===========================================================================
