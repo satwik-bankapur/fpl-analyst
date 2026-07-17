@@ -20,6 +20,7 @@ docs/     layer specs (source of truth)
 - The ONLY LLM calls in v1 live in the Writer (`writer/`). The Strategist node is rules-based in v1; it has a designated LLM insertion contract (Layer 3 §2.4) — do not add LLM calls anywhere else "to improve quality."
 - The whole graph must run end-to-end with the stub template Writer and zero LLM spend. The stub is permanent: it is the LLM-outage/validation-failure fallback, not scaffolding to delete.
 
+
 ## Intentional non-fixes — DO NOT "correct" these
 
 1. **base/attack double-counting (Layer 2 §2.3).** `form` already contains attacking returns; `attack_pts` measures attacking threat again via xGI. The 50/50 W_BASE/W_ATTACK blend IS the correction. Do not zero one side, deduplicate, or "fix" the overlap.
