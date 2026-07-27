@@ -3,18 +3,28 @@
 import { useState } from "react";
 import { postSignup } from "@/lib/api";
 
-export default function EmailCapture({ teamId, label }: { teamId?: number | null; label?: string }) {
+// Inline email row from the design: field + short button, no labels above.
+// `source` tags which surface captured the address (landing hero vs brief page).
+export default function EmailCapture({
+  teamId,
+  label,
+  source = "landing",
+}: {
+  teamId?: number | null;
+  label?: string;
+  source?: string;
+}) {
   const [email, setEmail] = useState("");
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (done) return <p className="text-sm text-pitch">Thanks — check your inbox.</p>;
+  if (done) return <p className="m-0 text-body text-in-green">Thanks — check your inbox.</p>;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     try {
-      await postSignup(email, teamId);
+      await postSignup(email, teamId, source);
       setDone(true);
     } catch {
       setError("That didn't work — check the address.");
@@ -22,19 +32,26 @@ export default function EmailCapture({ teamId, label }: { teamId?: number | null
   }
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-2 sm:flex-row">
-      <input
-        type="email"
-        required
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        placeholder="you@email.com"
-        className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
-      />
-      <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-white hover:opacity-90">
-        {label || "Get the free weekly preview"}
-      </button>
-      {error && <span className="text-sm text-red-600">{error}</span>}
+    <form onSubmit={submit} noValidate={false}>
+      <div className="flex gap-2">
+        <input
+          type="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@email.com"
+          aria-label="Email address"
+          className="field min-w-0 flex-1 bg-surface-900 py-2.5 text-body"
+        />
+        <button className="btn-primary shrink-0 whitespace-nowrap px-3.5 py-2.5 text-label">
+          {label || "Send it"}
+        </button>
+      </div>
+      {error && (
+        <p className="m-0 mt-2 text-body text-out-red" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }

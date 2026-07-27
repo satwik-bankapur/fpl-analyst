@@ -1,6 +1,10 @@
 // Minimal markdown block renderer for the stub Writer's output (bullets, quotes,
 // paragraphs). Deliberately tiny — no markdown dependency for the handful of
-// constructs the briefs use. Nested "  - " become sub-bullets.
+// constructs the briefs use.
+//
+// Typography here is the product (design §04): prose sits at 16/1.7 on mobile
+// and 17/1.7 on desktop, in ink-100, capped at a 64ch measure. Nothing in a
+// brief is set smaller than this, however dense the surrounding chrome gets.
 export default function Md({ text }: { text: string }) {
   const lines = text.split("\n");
   const blocks: JSX.Element[] = [];
@@ -9,9 +13,11 @@ export default function Md({ text }: { text: string }) {
   const flushList = () => {
     if (list.length) {
       blocks.push(
-        <ul key={`ul-${blocks.length}`} className="my-2 list-disc space-y-1 pl-5 text-slate-700">
+        <ul key={`ul-${blocks.length}`} className="my-3 max-w-measure list-disc space-y-2 pl-5 marker:text-ink-700">
           {list.map((li, i) => (
-            <li key={i}>{li}</li>
+            <li key={i} className="text-prose text-ink-100 sm:text-prose-lg">
+              {li}
+            </li>
           ))}
         </ul>
       );
@@ -31,15 +37,20 @@ export default function Md({ text }: { text: string }) {
       continue;
     }
     flushList();
-    if (line.startsWith(">")) {
+    if (/^-{3,}$/.test(line.trim())) {
+      blocks.push(<hr key={`hr-${blocks.length}`} className="my-5 max-w-measure border-0 border-t border-line" />);
+    } else if (line.startsWith(">")) {
       blocks.push(
-        <p key={`q-${blocks.length}`} className="my-2 border-l-2 border-slate-300 pl-3 text-sm italic text-slate-500">
+        <p
+          key={`q-${blocks.length}`}
+          className="my-3 max-w-measure border-l-2 border-line-strong pl-4 text-prose italic text-ink-500"
+        >
           {line.replace(/^>\s?/, "")}
         </p>
       );
     } else {
       blocks.push(
-        <p key={`p-${blocks.length}`} className="my-2 text-slate-700">
+        <p key={`p-${blocks.length}`} className="my-3 max-w-measure text-prose text-ink-100 sm:text-prose-lg">
           {line}
         </p>
       );
