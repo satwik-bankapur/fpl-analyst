@@ -1,9 +1,14 @@
 """Entry point + cache integration (§4).
 
 input_hash = hash(sorted picks + captain + bank + ep config_version +
-gameweek_anchor + curated_notes_version + euro_weeks_version). The curated-notes
-and euro-weeks tables don't exist yet — their versions are placeholder constants
-(graph/config.py), already mixed into the hash so the key shape is final.
+gameweek_anchor + curated_notes_version + euro_weeks_version).
+
+The curated-notes and euro-weeks versions are REAL sources as of 2026-07-10:
+max(updated_at) over `team_notes` / `european_weeks`, resolved from the DB in
+`graph.data`. (They were placeholder constants when this module was written; that
+is no longer true.) The first time either curated table is populated or edited,
+the version string changes and every cached brief invalidates exactly once — that
+mass miss is by design.
 
 Cache purpose (§5): the deterministic chain is cheap to rerun; the only guarded
 cost is the Writer (an LLM call in Layer 4). We resolve the squad cheaply, hash,

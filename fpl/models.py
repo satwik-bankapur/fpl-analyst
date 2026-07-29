@@ -158,9 +158,9 @@ class Fixture(Base):
 class EpScore(Base):
     """Computed output of the heuristic layer, rewritten each sync.
 
-    In Layer 1 this is populated by the STUB writer (`ep_stub`). Layer 2 replaces
-    the formula behind the same contract. `components` is REQUIRED and is the brief
-    writer's raw material.
+    Populated by the Layer 2 engine (`engine.scoring.score_all`), which replaced
+    the original Layer 1 `ep_stub` behind the same contract. `components` is
+    REQUIRED and is the brief writer's raw material.
     """
 
     __tablename__ = "ep_scores"

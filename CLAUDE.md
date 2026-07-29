@@ -10,11 +10,56 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current implementation state
 
-The docs describe a five-layer system (`fpl/ engine/ graph/ writer/ api/ web/`), but **only Layers 1–2 exist as code today**:
+*Verified against the tree on 2026-07-30. This section was wrong for months — it claimed
+Layers 3–5 were spec-only long after they shipped. If you change a layer's status, change
+it here in the same commit.*
 
-- `fpl/` — Layer 1: FPL API client, SQLAlchemy models, Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
-- `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`).
-- `graph/`, `writer/`, `api/`, `web/` — **spec-only** (Layer 3–5 docs exist, no code yet).
+**All five layers exist as code and are merged into `main`.** Stage A of Layer 5 is
+complete; Stage B (payments) is not started.
+
+- `fpl/` — Layer 1: FPL API client, SQLAlchemy models (13 tables), Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
+- `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`), `config_version` v1.4.
+- `graph/` — Layer 3: real LangGraph `StateGraph`, 5 deterministic nodes + a **template stub Writer**. Owns `graph/sections.py`, the canonical section vocabulary.
+- `writer/` — Layer 4: LLM writer, §7 validator, payload serializer, generic preview renderer. **Built and tested, but NOT in the serving path** — see below.
+- `api/` — Layer 5 Stage A: FastAPI, 12 routes. No checkout, webhooks, sends, or paywall.
+- `web/` — Layer 5 Stage A: Next.js frontend, 6 routes, re-skinned to the Scout Report design.
+
+### Current serving reality (read before you promise anything)
+
+The gap between what this repo *looks* like it does and what it does:
+
+- **Every brief a user receives comes from the deterministic template stub**
+  (`graph/nodes/writer.py`), not an LLM. It reads robotic because it is.
+- **`writer/llm.py` is wired to nothing.** `api/service.py` imports exactly one symbol
+  from `writer/` (`render_generic_stub`). The LLM writer, its prompt, and its
+  retry/validate/fallback ladder are complete and unit-tested, but no route calls them.
+  This is a pause point pending prompt iteration (layer4 §8), not a bug — but do not
+  describe the product as LLM-written until that wiring lands.
+- **No payments exist.** No checkout route, no webhook route, no `subscriptions` or
+  `webhook_events` tables, no Paddle account, no `PAYWALL_ENABLED`.
+- **The paywall mechanism exists and is proven fail-closed**, but is switched off:
+  `api/service.PAYWALL` is a `False` constant and every response carries
+  `locked_sections: []`. Flipping it is one line; see `graph/sections.py`.
+- **Nothing is deployed.** `render.yaml` and `.env.example` describe the launch topology;
+  no service has been created.
+
+`docs/STATUS.md` is the full audit behind this summary.
+
+### The section vocabulary (a paywall contract — do not fork it)
+
+`graph/sections.py` is the ONE definition of brief section keys. Both writers, the
+splitter, the paywall, and `web/lib/api.ts` derive from it. Before 2026-07-30 the
+vocabulary was defined three times and disagreed, which would have made the Stage B
+paywall **fail open** and serve the paid product free.
+
+Two properties keep that from recurring; `tests/test_sections.py` fails if either weakens:
+
+1. Free-tier gating is an **allow-list** (`FREE_SECTIONS`), never a deny-list over paid
+   keys — an unrecognised header is withheld, not leaked.
+2. Headers the vocabulary can't map get an `x_` prefix, so they can never impersonate a
+   canonical key.
+
+Never hard-code a `## Header` string in a writer, and never add per-route gating logic.
 
 ## Commands
 
@@ -38,9 +83,20 @@ The repo ships a working `.venv/` (Python 3.13). Use its interpreter explicitly.
 
 There is no lint/format tool configured — do not invent one.
 
+```bash
+# Frontend (separate terminal)
+npm --prefix web install
+cp web/.env.example web/.env.local          # points at 127.0.0.1:8000
+npm --prefix web run dev                    # http://localhost:3000
+npm --prefix web run build                  # must stay clean before any commit
+```
+
 ### Driving the engine offline
 
-`sync`/`mode` hit the **live** FPL API. To exercise Layers 1–2 deterministically against the frozen 2025-26 snapshot, use the committed driver (also the `/run-fpl-analyst` skill):
+`sync`/`mode` hit the **live** FPL API. To exercise Layers 1–2 deterministically against
+the frozen 2025-26 snapshot, use the committed driver (also the `/run-fpl-analyst` skill).
+It IS committed — `.gitignore` ignores `.claude/*` but re-includes `.claude/skills/`
+specifically so a fresh clone can follow these instructions:
 
 ```bash
 .venv/Scripts/python .claude/skills/run-fpl-analyst/driver.py engine  # parse -> score_all, prints a components blob
@@ -55,8 +111,16 @@ The frozen snapshot is a *finished* season (all 38 GWs done, current=38), so the
 - **Two contracts everything hangs on:** the Layer 2 `components` jsonb blob (§3) and the Layer 3 node handoff shapes (§2). Each layer consumes the previous layer's *contract*, not its implementation. Downstream code depends on the contract, not the formula behind it.
 - **Schema is Alembic-only.** `python -m fpl init-db` applies migrations. `fpl/models.py` is the source of truth an autogenerated migration is diffed against — after editing a model, run `alembic revision --autogenerate` and review it. `Base.metadata.create_all` is **test-only** (throwaway in-memory schema in `tests/conftest.py`); never add it to app/sync/scheduler startup.
 - **Sync is abort-or-nothing:** both payloads (bootstrap + fixtures) are fetched and validated up front, then all writes happen in a single transaction. A failed fetch leaves the DB exactly as it was ("stale beats broken") — so check the summary line, not just the exit code.
-- **Config:** Layer-1 runtime settings (`fpl/config.py`) are env-driven with the `FPL_` prefix (e.g. `FPL_DATABASE_URL`, defaults to `sqlite:///fpl.db`). The versioned *heuristic* config is separate and lives in `engine/config.py` — every tunable weight/table there is versioned via `config_version`, which is stamped into every components blob. No magic numbers inline.
+- **Config:** Layer-1 runtime settings (`fpl/config.py`) are env-driven with the `FPL_` prefix (e.g. `FPL_DATABASE_URL`, defaults to `sqlite:///fpl.db`). Layer-5 delivery settings (`api/config.py`) use the spec's **bare** names (`ADMIN_TOKEN`, `FRONTEND_ORIGIN`, …) — so spec `DATABASE_URL` is really `FPL_DATABASE_URL`. The versioned *heuristic* config is separate and lives in `engine/config.py` — every tunable weight/table there is versioned via `config_version`, which is stamped into every components blob. No magic numbers inline. **`.env.example` lists every variable the project reads**; keep it current.
+- **Section keys are a contract, not strings.** `graph/sections.py` only. It lives in `graph/` because `writer/` may import `graph/` but never the reverse — that is the only package all of graph/writer/api can share without breaking the boundary rule above.
+- **Deployment:** the launch topology is Render + Neon + GitHub Actions cron (`render.yaml`, `.github/workflows/sync.yml`, runbook `docs/deploy-stage-a-free.md`). `docs/railway.toml.deferred` is the paid-tier upgrade path, **not** active config. `RUN_SCHEDULER=true` and the Actions cron are mutually exclusive — two sync drivers on one DB double every sync and, in Stage B, every customer email.
 
 ## Testing expectations
 
 Tests are offline and deterministic — frozen `bootstrap.json` / `fixtures.json` assets served through a `FakeClient` (`tests/conftest.py`), never the network. Every scored player's `components` blob must validate against the Layer 2 §3 schema.
+
+`tests/test_sections.py` is the paywall contract suite. Its literal markdown fixtures are
+hand-written **on purpose** — deriving them from the constants under test would make them
+vacuous. `tests/test_graph.py::test_real_stub_output_splits_to_canonical_keys` is the link
+that proves the live writer still matches those fixtures. If an assertion there fails, fix
+the vocabulary, not the assertion.
