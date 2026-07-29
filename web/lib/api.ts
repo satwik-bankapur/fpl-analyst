@@ -85,10 +85,14 @@ export function postSignup(email: string, teamId?: number | null, source = "land
   }).then(json<{ ok: boolean }>);
 }
 
-// Canonical section order + display titles (shared by BriefView / preview).
-// The KEYS and their ORDER are the API contract — the renderer splits on them.
-// Only the display strings below changed in the re-skin, to the design's labels.
-export const SECTION_ORDER = ["verdict", "transfer", "captaincy", "bench_plan", "chips", "watchlist", "fixtures"];
+// MIRROR OF graph/sections.py — keep the two in sync, that module is the source
+// of truth. The KEYS and their ORDER are the API contract; the backend splitter
+// maps every writer's headers onto exactly these keys.
+//
+// `fixtures` was removed on 2026-07-30: it existed only in the stub writer, was
+// never producible by the LLM writer, and so could not be gated coherently. Its
+// content now renders inside `bench_plan` ("the plan" IS the forward view).
+export const SECTION_ORDER = ["verdict", "transfer", "captaincy", "bench_plan", "chips", "watchlist"];
 export const SECTION_TITLES: Record<string, string> = {
   verdict: "The verdict",
   transfer: "This week's transfer",
@@ -96,5 +100,18 @@ export const SECTION_TITLES: Record<string, string> = {
   bench_plan: "Bench order & the plan",
   chips: "Chips",
   watchlist: "Watchlist",
-  fixtures: "Fixture notes",
+};
+
+// Sections the Stage B paywall withholds. Mirrors graph.sections.PAID_SECTIONS —
+// used for copy only; the backend allow-list is what actually gates content.
+export const PAID_SECTIONS = ["bench_plan", "chips", "watchlist"];
+
+// The generic preview is a public teaser with its own vocabulary, deliberately
+// disjoint from SECTION_ORDER so it can never be mistaken for a lockable section.
+export const PREVIEW_ORDER = ["the_week_ahead", "form_and_fixtures", "the_differentials", "trap_of_the_week"];
+export const PREVIEW_TITLES: Record<string, string> = {
+  the_week_ahead: "The week ahead",
+  form_and_fixtures: "Form and fixtures",
+  the_differentials: "The differentials",
+  trap_of_the_week: "Trap of the week",
 };

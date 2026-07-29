@@ -1,7 +1,7 @@
 import BriefView from "@/components/BriefView";
 import LoadingState from "@/components/LoadingState";
 import ErrorState from "@/components/ErrorState";
-import { Brief } from "@/lib/api";
+import { Brief, PAID_SECTIONS } from "@/lib/api";
 import { SiteHeader, Eyebrow } from "@/components/Chrome";
 
 // Dev story (not linked from the product). Renders BriefView twice from hardcoded
@@ -16,27 +16,33 @@ const base: Omit<Brief, "sections" | "locked_sections"> = {
   team_name: "Story FC", overall_rank: 42000, bank: 1.5, cached: true,
 };
 
+// All six canonical keys, so the Stage B panel below can lock a section that
+// genuinely exists. Locking a key with no content is precisely the bug fixed on
+// 2026-07-30 — the API now only names a section in `locked_sections` when it was
+// really produced and removed, so a fixture that fakes it would demo an
+// impossible state.
 const stageA: Brief = {
   ...base,
   sections: {
-    verdict: "- Projected XI: 62 pts this GW.\n- Problems flagged: 1. Chip stance: hold.",
+    verdict: "- Projected XI: 62 pts this GW.\n- Problems flagged: 1.",
     transfer: "- ROLL: no move clears the +2.0 bar; bank the transfer.",
     captaincy: "- Captain: Haaland (MCI). Vice: Salah (LIV).",
-    bench_plan: "- Sels → Richarlison → Gvardiol → Kluivert",
+    bench_plan: "- Sels → Richarlison → Gvardiol → Kluivert\n- Entering a good run: NEW, ARS",
+    chips: "- Stance: consider bench boost or tc.",
     watchlist: "- Mbeumo (BRE)",
   },
   locked_sections: [],
 };
 
+// What the same component renders once `graph.sections.gate_sections` runs with
+// paywall=True: free sections only, paid keys named on one lock card.
 const stageB: Brief = {
   ...base,
   team_name: "Story FC (paywalled)",
-  sections: {
-    verdict: stageA.sections.verdict,
-    transfer: stageA.sections.transfer,
-    captaincy: stageA.sections.captaincy,
-  },
-  locked_sections: ["bench_plan", "chips", "watchlist"],
+  sections: Object.fromEntries(
+    Object.entries(stageA.sections).filter(([k]) => !PAID_SECTIONS.includes(k))
+  ),
+  locked_sections: PAID_SECTIONS,
 };
 
 function Panel({ label, children }: { label: string; children: React.ReactNode }) {

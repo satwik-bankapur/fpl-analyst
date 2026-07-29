@@ -1,3 +1,17 @@
+# ⚠️ NOT THE LAUNCH CONFIG. DEFERRED, NOT ACTIVE. ⚠️
+#
+# Railway moved to paid-only (2026-07-15), so the Stage A launch topology is
+# Render + Neon + GitHub Actions cron — see `render.yaml` at the repo root and
+# `docs/deploy-stage-a-free.md`. This file is kept as the documented UPGRADE path
+# (its runbook is `docs/deploy-stage-a.md`), which is why it lives in docs/ with a
+# .deferred suffix instead of at the repo root where Railway would auto-detect it.
+#
+# To adopt it: move it back to the repo root as `railway.toml`, set
+# RUN_SCHEDULER=true, and DELETE `.github/workflows/sync.yml`. Never run both —
+# two sync drivers on one DB is the duplicate-sync failure the single-replica
+# invariant exists to prevent.
+#
+# ---------------------------------------------------------------------------
 # Railway deployment (spec §5). ONE service, ONE replica — hard requirement.
 #
 # The FastAPI process runs APScheduler in-process (RUN_SCHEDULER=true). A second

@@ -110,11 +110,16 @@ def get_draft_brief(draft_id: uuid.UUID, deps: Deps = Depends(get_deps)):
 
 
 @router.get("/brief/{team_id}/{gw}")
-def get_team_brief(team_id: int, gw: int, token: str | None = None,
-                   deps: Deps = Depends(get_deps)):
+def get_team_brief(team_id: int, gw: int, deps: Deps = Depends(get_deps)):
     # Stage A: no season briefs are generated and no tokens are minted, so this
-    # only ever serves an already-persisted brief (free view). Token gating +
-    # full-view unlock is Stage B (spec §1.2).
+    # only ever serves an already-persisted brief (free view).
+    #
+    # The spec's `?token=` param (§1.2) is DELIBERATELY ABSENT rather than
+    # accepted-and-ignored (removed 2026-07-30). Nothing mints or verifies a JWT
+    # yet, and a signature-shaped parameter that silently does nothing reads as
+    # implemented auth to the next person. Stage B adds it back together with
+    # BRIEF_TOKEN_SECRET and the send job that mints it. FastAPI ignores unknown
+    # query params, so an early `?token=x` caller still gets the free view.
     brief = service.get_team_brief(deps, team_id, gw)
     if brief is None:
         raise HTTPException(status_code=404, detail={"error": "invalid_team_id"})

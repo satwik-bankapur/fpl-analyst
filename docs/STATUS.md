@@ -1,0 +1,621 @@
+# Project status — 2026-07-30
+
+Written by reading the repo, running the suites, and tracing contracts end to end.
+**Not** by reading the specs. Where the specs and the code disagree, the code wins
+and the disagreement is recorded below.
+
+**Two passes are recorded here.** The audit (§1–6) was read-only. A follow-up
+pre-hibernation pass then fixed the items marked ✅ **FIXED** — see §7 for exactly
+what changed and what deliberately did not. Where a §1–6 finding has been resolved,
+the original text is kept (so the reasoning survives) with the fix noted inline.
+
+Post-fix state: **155 tests passing**, `npm run build` clean, everything merged to
+`main` and pushed.
+
+---
+
+## 1. Repo state
+
+### Working tree
+
+**Clean.** `git status --porcelain` returns nothing. No uncommitted work, no untracked
+work that isn't deliberately gitignored.
+
+Untracked-but-ignored files present in the tree (intentional, via `.gitignore`):
+`check_squad.py`, `scratch_brief.py`, `scratch_decomp.py`, `scratch_fetch.py`,
+`scratch_preseason.py`, `scratch_writer.py`, `fpl.db` (1.0 MB local SQLite),
+`.venv/`, `.claude/`, `.next/`, `node_modules/`.
+
+Note: `.claude/` is gitignored, which means **`.claude/skills/run-fpl-analyst/driver.py`
+is NOT in the repo.** The root `CLAUDE.md` documents it as "the committed driver". It
+isn't committed. A fresh clone does not get it. See §5.
+> ✅ **FIXED** (§7): `.gitignore` now uses `.claude/*` + `!.claude/skills/`; the driver
+> and its SKILL.md are committed, `settings.local.json` stays ignored.
+
+### Branches
+
+| Branch | Head | Merged into main? | What's on it |
+|---|---|---|---|
+| `main` | `dd7613f` | — | Everything through Stage A free-tier deploy + READMEs |
+| `origin/main` | `dd7613f` | in sync | Same as local main |
+| `stage-a-reskin` | `2fbfdb3` | **NO — the only unmerged branch** | The Scout Report visual re-skin of `web/` |
+| `stage-a-free-tier` | `dd7613f` | yes (fully merged, == main) | Stale pointer, safe to delete |
+| `layer1-data-pipeline` | `ba3a10c` | yes | Historical |
+| `layer2-heuristic-engine` | `53b0299` | yes | Historical |
+| `layer3-langgraph-pipeline` | `4e8b748` | yes | Historical |
+| `layer4-brief-writer` | `f96ad2d` | yes | Historical |
+| `layer5-delivery` | `7693b3a` | yes | Historical |
+
+**You are currently on `stage-a-reskin`.** It is one commit ahead of main and has never
+been pushed (no remote tracking branch). If your laptop dies, the re-skin is gone. Five
+merged layer branches are dead weight and can be pruned.
+
+### Latest commit on main
+
+`dd7613f` — "Add docs and web readme". The layer it *closed* was **Layer 5 Stage A**:
+the real closing work was `05db78b` ("Stage A: free-tier deployment topology — Render +
+Neon + Actions cron"), with `dd7613f` a docs-only follow-up. Main is therefore
+"Stage A complete, deployable, not deployed."
+
+The one unmerged commit `2fbfdb3` is the frontend re-skin, which per its own drift note
+changed no contracts.
+
+---
+
+## 2. What actually works right now
+
+### Verified runs
+
+```
+.venv/Scripts/python -m pytest -q     →  124 passed, 1 warning in 9.76s
+npm --prefix web run build            →  ✓ Compiled successfully, 6 routes, no type errors
+```
+
+Both green, on the current `stage-a-reskin` checkout. The one warning is a Starlette
+deprecation notice about httpx in FastAPI's TestClient — cosmetic, not ours.
+
+Test distribution (124 total):
+
+| File | Tests |
+|---|---|
+| `test_engine.py` | 18 |
+| `test_api.py` | 17 |
+| `test_graph.py` | 11 |
+| `test_writer.py` | 9 |
+| `test_parsers.py` | 8 |
+| `test_sync.py` | 7 |
+| `test_client.py` | 4 |
+| `test_rollover.py` | 4 |
+| `test_imports.py` | 1 |
+
+Next.js build output: `/` and `/brief/draft/[draftId]` are dynamic (ƒ), `/privacy`,
+`/story`, `/_not-found` static (○), `/brief/[teamId]` dynamic. First Load JS 87–102 kB.
+
+### Per-layer reality
+
+**The root `CLAUDE.md` is materially wrong.** It states: *"only Layers 1–2 exist as code
+today… `graph/`, `writer/`, `api/`, `web/` — spec-only (Layer 3–5 docs exist, no code
+yet)."* All five layers have shipped code and are merged into main. This is the single
+most misleading document in the repo for a returning developer. Fix it first.
+
+| Layer | Status | Evidence checked |
+|---|---|---|
+| **1 — `fpl/`** | **Built** | 11 modules, 1,185 LOC. `client.py`, `models.py` (13 tables), `sync.py`, `parsers.py`, `scheduler.py`, `migrate.py`, `__main__.py` CLI. 3 Alembic migrations. 23 tests across sync/parsers/client/rollover. |
+| **2 — `engine/`** | **Built** | 4 modules, 569 LOC. `scoring.py` + `baseline.py` + versioned `config.py` at `config_version = "v1.4"`. 18 tests. |
+| **3 — `graph/`** | **Built, on a stub Writer** | 15 modules, 1,229 LOC. Real LangGraph `StateGraph`. 5 real nodes + `nodes/writer.py`, which is a deterministic template renderer, not an LLM. 11 tests incl. a golden-path brief. |
+| **4 — `writer/`** | **Built but NOT WIRED IN** | 8 modules, 661 LOC. `llm.py` (real Anthropic call), `validator.py` (5 gates), `serializer.py`, `generic.py`, `seeds.py`, prompt `system_v0.1.md`, 10 frozen payload fixtures. 9 tests. **Dead code in the serving path — see below.** |
+| **5 — `api/`** | **Stage A built** | 7 modules, 683 LOC. 12 routes. 17 tests. Stage B (checkout/webhooks/sends/paywall) absent. |
+| **5 — `web/`** | **Stage A built + re-skinned** | 1,601 LOC TS/TSX. 6 routes, 13 components. Builds clean. Re-skin unmerged. |
+
+### Running on stubs — named explicitly
+
+**1. The brief writer that users actually see is the Layer 3 template stub, not the LLM.**
+
+This is the biggest gap between the docs' impression and reality. Traced:
+
+```
+api/service.py:139   generate_brief → graph.cache.get_or_generate
+graph/cache.py:28    imports STUB_MODEL from .nodes.writer
+graph/nodes/writer.py:1  "Writer STUB (§2.5) — deterministic template renderer, NEVER an LLM"
+```
+
+`grep -rn "writer.llm" api/ graph/` returns **nothing**. `api/service.py` imports exactly
+one thing from `writer/`: `render_generic_stub`. So the entire Layer 4 LLM writer
+(`writer/llm.py`, the prompt, the validator, the retry/fallback ladder) is built, tested
+in isolation, and **never called by any route**. Every brief a real user receives today
+is robotic interpolated template text.
+
+Layer 4's own drift note (2026-07-10) admits the pause point — but it reads as "prompt
+iteration is pending", not "the LLM is not connected to the product at all". The
+honest statement is the latter.
+
+**2. The generic preview is a deterministic stub** — `writer/generic.render_generic_stub`,
+rendered live per request behind `Cache-Control: max-age=3600`, no persisted row.
+
+**3. `GET /api/brief/{team_id}/{gw}` is a read-only shell** — Stage A never generates
+season briefs, so it serves only already-persisted rows, and `team_name` / `overall_rank`
+/ `bank` are hardcoded `None`. The frontend page for it (`web/app/brief/[teamId]/page.tsx`)
+is an explicit placeholder.
+
+**4. `locked_sections` is hardcoded `[]`** at `api/service.py:119` and `:168`. The paywall
+mechanism exists as a data shape only.
+
+**5. Email is a no-op unless keyed** — empty `RESEND_API_KEY` makes `api/mail.py` log and
+return. Only the Welcome template exists.
+
+**6. ~~`graph/config.py` ships placeholder version constants~~ — WRONG, my error.**
+`curated_notes_version` / `euro_weeks_version` have been real DB-backed sources
+(`graph/data.py:80,86`, `max(updated_at)` over the curated tables) since 2026-07-10. I
+matched on the word "placeholder" in a *historical* comment and reported stale prose as
+stale code. The `graph/cache.py` docstring genuinely was wrong and has been corrected.
+
+---
+
+## 3. What's missing between here and a paying customer
+
+Verified against code, not copied from spec. Every item below was confirmed absent by grep.
+
+| # | Item | Evidence it's missing | Effort |
+|---|---|---|---|
+| 1 | **`subscriptions` table** | `fpl/models.py` has 13 tables; no `Subscription` class. Not in any of the 3 migrations. | 0.5 d (model + migration + tests) |
+| 2 | **`webhook_events` table** (idempotency) | Same — absent. | 0.25 d (with #1) |
+| 3 | **`POST /api/checkout`** (spec §1.6) | Not in `api/routes.py`. Zero `stripe`/`paddle` references in any `.py`. | 1 d incl. Paddle SDK wiring |
+| 4 | **`POST /api/webhooks/paddle`** (spec §1.7) | Absent. Needs `Paddle-Signature` HMAC verify *before* parse, per `docs/CLAUDE.md:62`. | 1.5 d — 6 event types to map |
+| 5 | **`PAYWALL_ENABLED` flag + section gating** | Not in `api/config.py` (which has 8 settings, none of them this). `locked_sections` hardcoded `[]`. | 0.5 d — but see §5, the key vocabulary is broken first |
+| 6 | **JWT brief tokens** | `brief_token_secret` exists in config but is unused; no mint, no verify, no `jose`/`pyjwt` import. `GET /api/brief/{team_id}/{gw}` accepts a `token` param it does nothing with. | 1 d |
+| 7 | **Weekly send job** | No batch runner anywhere. `fpl/scheduler.py` schedules sync only. | 2 d — batching, per-sub token mint, failure isolation |
+| 8 | **Email templates 1 & 2** (paid weekly, free preview) | `api/mail.py` has Welcome only. | 1 d |
+| 9 | **Persisted generic preview singleton** | `service.preview()` renders live every call. Migration `b2c3d4e5f6a7` already relaxed the `briefs` CHECK to allow the row — the row is just never written. Send job (#7) needs it. | 0.5 d |
+| 10 | **Paddle account + verification** | No account referenced anywhere. **This is the critical-path item you don't control** — provider verification latency. | Calendar weeks, ~0 dev time |
+| 11 | **Real LLM briefs in the serving path** | §2 above. Not a Stage B spec item — it was silently skipped. | 1 d wiring + open-ended prompt iteration |
+| 12 | **Section-key vocabulary fix** | See §5. Blocks #5 correctness. | 0.5 d |
+
+**Rough total: ~11 developer-days**, plus Paddle verification calendar time running in
+parallel. Start #10 the day you pick this up — it's the only item with external latency.
+
+### Specced but silently skipped
+
+- **The LLM writer never reached the serving path** (#11). No drift note says "the product
+  ships stub briefs". Layer 4's note frames it as a pause, which undersells it.
+- **`GET /api/brief/{team_id}/{gw}` accepts an unused `token` parameter.** Signature
+  suggests gating; body ignores it. Looks implemented, isn't.
+- **`fpl/scheduler.py` is fully built and entirely unused in the launch topology.**
+  `RUN_SCHEDULER` defaults off and is not set on Render. Correct decision (documented in
+  the 2026-07-15 note), but ~100 LOC of live-looking dead code.
+- **`railway.toml` is committed but describes an abandoned topology.** Railway went paid;
+  launch is Render. The file is preserved as the upgrade path — but nothing in the filename
+  says "not in use", and it's the only deploy config at repo root.
+- **No `render.yaml` / `vercel.json`.** The actual launch topology has **zero committed
+  infrastructure config**. Everything is dashboard-clicked per `docs/deploy-stage-a-free.md`.
+  Reproducing the deploy is a manual runbook, not a file.
+
+---
+
+## 4. Deployment state
+
+### Is anything deployed?
+
+**No.** Nothing is live. Evidence:
+- `web/.env.local` points at `http://127.0.0.1:8000` — local only.
+- No `render.yaml`, no `vercel.json`, no deployment metadata anywhere in the tree.
+- `.github/workflows/sync.yml` exists and is valid, but depends on two repo secrets
+  (`API_BASE_URL`, `ADMIN_TOKEN`) that only have meaning once a service exists.
+- The only remote is the GitHub origin; main is pushed, nothing else.
+
+### Cold start to live, per `docs/deploy-stage-a-free.md`
+
+The runbook is genuinely complete — 9 sections, sequenced, with a smoke checklist. Path:
+
+0. Accounts & prerequisites (marked 🔴 HUMAN)
+1. Render — API web service (free)
+2. Neon — Postgres (free)
+3. Environment variables on Render
+4. GitHub Actions sync cron — set `API_BASE_URL` + `ADMIN_TOKEN` repo secrets
+5. Vercel + CORS on platform subdomains
+6. Resend — email (optional for launch)
+7. First production sync
+8. Smoke checklist
+9. Upgrade path + rollback
+
+Realistically **half a day** if accounts already exist, most of it waiting on
+provisioning and the first sync.
+
+**Do this before deploying:** merge `stage-a-reskin` into main. Both platforms deploy from
+main, so deploying today ships the pre-re-skin UI.
+
+### External accounts required
+
+| Account | Needed for | Config in repo? |
+|---|---|---|
+| Render | API hosting | ❌ No `render.yaml`. Dashboard-only. |
+| Neon | Postgres | ❌ Consumed as `FPL_DATABASE_URL` env var only. |
+| Vercel | Frontend | ❌ No `vercel.json`. `NEXT_PUBLIC_API_URL` set in dashboard. |
+| GitHub Actions | Sync cron | ✅ `.github/workflows/sync.yml` committed. Needs 2 secrets. |
+| Resend | Email | ✅ `api/mail.py` + `RESEND_API_KEY`/`SEND_FROM` in `api/config.py`. Degraded without a verified domain. |
+| Anthropic | LLM writer | ⚠️ `writer/config.py` reads model/key from env — but nothing calls it (§2). |
+| Paddle | **Payments** | ❌ **Nothing. No account, no config, no code.** |
+
+So: 5 of 7 accounts have no committed configuration, and the payments provider has no
+presence in the repo at all.
+
+### Free-tier constraints you accepted
+
+- Render sleeps after ~15 min idle → first request pays ~1 min cold start. The sync
+  workflow pings `/api/health` first to absorb it. **A real user's first brief request
+  hits that same cold start with no warm-up.**
+- Neon free has no scheduled backups (~24h PITR only). Documented as an **accepted gap
+  that expires at the first season rollover**, after which `players_archive` is
+  irreplaceable. That's a hard deadline for the paid upgrade, not a nice-to-have.
+- Vercel preview deploys get distinct hostnames and **will fail CORS** against the single
+  allowed `FRONTEND_ORIGIN`. Expected, documented, still surprising in the moment.
+- Sync cadence is flat twice-daily. Layer 1 §3 wants 3-hourly inside deadline−48h. Fine
+  pre-season; **wrong from the GW1 deadline onward.**
+
+---
+
+## 5. Known issues and open questions
+
+### The section-key question — resolved, and it's worse than "fixtures vs chips"
+
+You asked whether the re-skin rendered `fixtures` where the spec lists `chips`. Traced the
+full chain. Three findings.
+
+**(a) `chips` is never produced by any backend code path today.**
+
+```
+graph/nodes/writer.py emits:  Verdict, Transfer, Captaincy, Bench order, Watchlist, Fixture notes
+api/service.py:31 _SECTION_KEYS maps exactly those six → verdict, transfer, captaincy,
+                  bench_plan, watchlist, fixtures
+```
+
+`grep -rn "chips" --include=*.py` across the whole repo returns **one hit**, and it's a
+comment in `writer/config.py:36`. There is no `"Chips": "chips"` entry in `_SECTION_KEYS`.
+
+Meanwhile the frontend `SECTION_ORDER` (`web/lib/api.ts`) carries seven keys including
+`chips`, with a title ("Chips") and an icon. So the frontend is a superset of what the
+backend can emit. The re-skin didn't substitute `fixtures` for `chips` — **the backend
+grew a `fixtures` section the spec never listed, and never grew the `chips` one it did.**
+
+**(b) Does `chips` render when present? Yes, correctly.**
+
+`BriefView.tsx:34-36` builds keys as the union of `SECTION_ORDER` + response section keys +
+`locked_sections`, then filters to keys actually present in `sections` or `locked_sections`.
+So `chips` in `SECTION_ORDER` but absent from the response is **filtered out — no empty
+section renders.** If the backend ever emits it, it renders in the right ordinal position
+(after `bench_plan`) with the right title and icon. Forward-compatible. This part is fine.
+
+**(c) The lock card's section list does NOT match real keys, and it fails open. This is
+a live paywall defect waiting for Stage B.**
+
+`LockCard` takes `titles={run.keys.map(sectionTitle)}` — it renders whatever keys the API
+puts in `locked_sections`. Spec §1.1 says Stage B will send
+`locked_sections: ["bench_plan", "chips", "watchlist"]`.
+
+If you ship that literally against today's writer:
+- `bench_plan` ✅ exists → gets locked correctly
+- `watchlist` ✅ exists → gets locked correctly
+- `chips` ❌ never in `sections` — but it **is** in `locked_sections`, so it passes
+  BriefView's filter and **the lock card advertises "Chips" content that does not exist
+  behind the paywall.** You'd be charging for a section the writer never writes.
+
+**And the deeper problem — swapping in the real LLM writer breaks the key vocabulary
+entirely.** `_SECTION_KEYS` was built against the *stub's* headers. The LLM prompt
+(`writer/prompts/system_v0.1.md:16-21`) emits different header text, and
+`split_sections` slugs anything unmapped via `head.lower().replace(" ", "_")`:
+
+| LLM prompt header | `_SECTION_KEYS` match? | Resulting key |
+|---|---|---|
+| `## The verdict` | ❌ (map has "Verdict") | `the_verdict` |
+| `## This week's transfer` | ❌ (map has "Transfer") | `this_week's_transfer` |
+| `## Captaincy` | ✅ | `captaincy` |
+| `## Bench order & the plan` | ❌ (map has "Bench order") | `bench_order_&_the_plan` |
+| `## Chips` | — (slug coincidence) | `chips` |
+| `## Watchlist` | ✅ | `watchlist` |
+
+Four of six keys change. Consequence: gating on `["bench_plan", "chips", "watchlist"]`
+would lock **nothing** (`bench_plan` no longer exists as a key) — the paywall **fails open
+and gives the paid product away free**, while ordering and icons silently degrade to
+the prose fallback.
+
+**Verdict:** the section-key vocabulary is a genuine unresolved paywall contract bug.
+It is invisible today because the stub writer happens to emit headers matching
+`_SECTION_KEYS`, and because `locked_sections` is hardcoded `[]`. It becomes a
+revenue-losing bug the moment either changes. **Fix `_SECTION_KEYS` to cover both writers'
+headers, and add a test asserting every `SECTION_ORDER` key is producible, before touching
+`PAYWALL_ENABLED`.**
+
+Related, minor: the generic preview emits entirely different headers again —
+`the_week_ahead`, `form_and_fixtures`, `the_differentials`, `trap_of_the_week`. None are in
+`SECTION_ORDER`, so `PreviewTeaser.tsx:8`'s `SECTION_ORDER.find(...)` **never matches** and
+always falls through to `Object.keys(preview.sections)[0]`. It works, but by accident —
+that lookup is dead code.
+
+### Every dated drift note, collected
+
+**Layer 2 — `docs/layer2-heuristic-engine.md`**
+- `2026-07-09` — `score_player` takes an `EngineContext` from `build_context(...)`, not the §8 six-arg signature. Same contract; context computed once per sync instead of per-player.
+- `2026-07-09` — §5 baseline table recomputed on demand in `build_context`, not persisted to a `baseline_ep` table at rollover.
+- `2026-07-10` (fix, v1.2) — `MIN_MINUTES_XGI` (270) floor now applied symmetrically on the archive path; below it, `xgi_per90` falls back to the (position, price-band) baseline and emits `thin_minutes_sample`.
+- `2026-07-10` (fix, v1.3) — added `W_CS=0.5` weighting the expected clean-sheet term. Corrects a ~1.5× double-count of defensive production vs 1.0× attacking. Not the §2.6 positioning rule.
+- `2026-07-10` (feature, v1.4) — European-week rotation dampener adopted from Layer 4 §1.2. `EURO_ROTATION_DAMP={1:0.90,2:0.90,3:0.85}`, `EURO_MIN_SHARE=0.85`. No-op when `euro_weeks` empty.
+
+**Layer 3 — `docs/layer3-langgraph-pipeline.md`**
+- `2026-07-10` — `cold_form` detection restricted to `IN_SEASON`; pre-season it false-positived the entire squad.
+- `2026-07-10` — realized with real LangGraph `StateGraph`; `MarketScout`/`FixturePlanner` kept sequential, not parallel (whole chain <1s).
+- `2026-07-10` — `input_hash` mixes `curated_notes_version` + `euro_weeks_version`, both placeholder constants in `graph/config.py`. Changing them invalidates every cached brief exactly once, by design.
+
+**Layer 4 — `docs/layer4-brief-writer.md`**
+- `2026-07-10` — `temperature 0.7` **is not sent**; `claude-sonnet-5` rejects sampling params with a 400. Preserved behind `SEND_TEMPERATURE=False`.
+- `2026-07-10` — §1.2 European dampener implemented in **Layer 2** (v1.4), not Layer 4.
+- `2026-07-10` — §7 name whitelist compares against global `players.web_name`. A wholly fictional name matching no real player is **not caught**; closed-world prompt + number/header/length gates are the only backstop.
+- `2026-07-10` — generic preview and personalized brief both ship as deterministic template renderers. LLM call wired and smoke-tested; prompt iteration to v≥0.2 is §8 human-in-the-loop work.
+
+**Layer 5 — `docs/layer5-delivery-surface.md`**
+- `2026-07-11` (Stage A backend) — 10 sub-notes: `DATABASE_URL`→`FPL_DATABASE_URL` mapping; `RUN_SCHEDULER` gate default-off; new `GET /api/brief/draft/{draft_id}`; §1.1 response gained `draft_id`/`overall_rank`/`bank`; Stage A returns everything with `locked_sections: []`; `email/`→`api/mail.py` (stdlib shadow); preview field is `sections` not `html_sections`; `get_or_generate` gained a `before_generate` rate-limit hook; **fixed a merged Layer 4 bug** — `writer/generic.py` imported two constants from `writer.config` where they don't exist, shipped green in `f96ad2d` because no test imported the module; `GET /api/brief/{team_id}/{gw}` is a pure read.
+- `2026-07-11` — **Stage B TODO: persist the generic preview.** Currently rendered live per request; the weekly send job needs a persisted singleton.
+- `2026-07-15` (free-tier topology) — 6 sub-notes: scheduler moved out of process (the one architecturally load-bearing change — free Render sleeps); new `POST /api/admin/sync`; sync cadence downgraded to flat twice-daily; no custom domain at launch (Vercel previews will fail CORS); **backups are a genuine gap, not a deferral** — hard deadline at first season rollover; email degraded without a verified domain.
+- `2026-07-28` (re-skin) — design theme transcribed to `tailwind.config.ts`; **section display titles changed, keys and order did not**; one lock card per *run* of consecutive locked keys.
+
+### TODO / FIXME / placeholder inventory
+
+No literal `TODO:` or `FIXME:` markers exist in the codebase. What exists instead:
+
+- `api/service.py:119`, `:168` — `"locked_sections": []` with `# Stage B populates this`
+- `web/app/brief/[teamId]/page.tsx:7` — explicit pre-season placeholder page
+- `web/components/LockCard.tsx:3` — "Paid-section placeholder", exercised only by `/story`
+- `graph/config.py:6` — placeholder version constants for tables that don't exist
+- `graph/cache.py:5` — same, curated/euro-week versions
+- `fpl/models.py:161` — comment still says `ep_scores` is populated by the Layer 1 **stub** writer; Layer 2 replaced it. Stale comment.
+- `fpl/__init__.py:5` — same stale "(placeholder) stub writer" reference
+- `docs/layer5-delivery-surface.md:156` — the one flagged "Stage B TODO"
+
+### Things a returning developer will trip over
+
+1. **The root `CLAUDE.md` says Layers 3–5 don't exist.** They do, all merged. Highest-value
+   fix in the repo.
+2. **`CLAUDE.md` points at `.claude/skills/run-fpl-analyst/driver.py` as "the committed
+   driver". `.claude/` is gitignored — it is not committed.** A fresh clone has no offline
+   driver, and the documented "drive the engine offline" workflow is impossible.
+3. **The re-skin is unmerged and unpushed.** One local commit; no remote copy.
+4. **`railway.toml` is the only root-level deploy config and describes an abandoned
+   platform.** Actual topology (Render) has none.
+5. **Stub vs LLM.** `graph/nodes/writer.py` and `writer/llm.py` both exist. Only the stub
+   runs. The `writer/` package's docstrings describe an LLM pipeline that nothing invokes.
+6. **`fpl.db` (1 MB) sits in the working tree, gitignored.** State from a July 28 E2E
+   session. Unknown freshness — re-seed rather than trust it.
+7. **The frozen test snapshot is a *finished* season** (all 38 GWs, current=38), so the
+   engine runs `IN_SEASON` at GW38 with a single-fixture horizon. `ep == ep_next4` there
+   is correct, not a bug. Documented, but it looks alarming.
+8. **Two sync drivers must never both be on.** `RUN_SCHEDULER=true` (paid) XOR the Actions
+   cron (free). Both = double sync and, in Stage B, double emails to paying customers.
+9. **`brief_token_secret` and the `token` query param exist but do nothing.** They read as
+   implemented auth. They are not.
+10. **`_SECTION_KEYS` is coupled to the stub writer's exact header strings.** See the
+    paywall analysis above.
+
+---
+
+## 6. Cold-start guide for future me
+
+### From a fresh clone
+
+```bash
+git clone https://github.com/satwik-bankapur/fpl-analyst.git
+cd fpl-analyst
+
+# Backend — Python 3.13
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[dev]"      # Windows
+# .venv/bin/python -m pip install -e ".[dev]"        # Linux/macOS
+
+.venv/Scripts/python -m pytest -q                    # expect 124 passed
+.venv/Scripts/python -m fpl init-db                  # Alembic migrations, once
+.venv/Scripts/python -m fpl sync                     # LIVE FPL API → scores → ep_scores
+.venv/Scripts/python -m fpl mode                     # derived mode + next GW
+
+# API
+.venv/Scripts/python -m uvicorn api.main:app --reload --port 8000
+
+# Frontend (second terminal)
+npm --prefix web install
+echo "NEXT_PUBLIC_API_URL=http://127.0.0.1:8000" > web/.env.local
+npm --prefix web run dev                             # http://localhost:3000
+```
+
+Useful pages: `/` (landing + draft picker), `/story` (renders every component state
+including the **only** exercise of `LockCard`), `/brief/draft/<uuid>`.
+
+⚠️ **The `.claude/skills/run-fpl-analyst/driver.py` offline driver is gitignored and will
+NOT be in a fresh clone.** Without it there is no offline path to exercise Layers 1–2
+against the frozen snapshot — `sync`/`mode` hit the live API. If you want that workflow
+back, un-ignore and commit the driver.
+
+### Recurring human inputs
+
+| Input | Where it lives | How it's fed |
+|---|---|---|
+| **`team_notes`** | `team_notes` table (`fpl/models.py:242`) | `POST /api/admin/notes` — Bearer `ADMIN_TOKEN`. `{team_id, note}`. No UI. |
+| **`european_weeks`** | `european_weeks` table (`fpl/models.py:259`) | `POST /api/admin/euro-weeks` — Bearer `ADMIN_TOKEN`. `{team_id, gameweek, competition, tie_importance}`. Drives the v1.4 rotation dampener. Empty = no-op. |
+| **Engine calibration** | `engine/config.py`, `config_version = "v1.4"` | Every weight/table is versioned; bumping `config_version` stamps into every components blob. **Never inline a magic number.** |
+| **Graph tunables** | `graph/config.py` | Incl. the placeholder version constants — changing them invalidates the whole brief cache once. |
+| **Writer tunables** | `writer/config.py` | Length gates (250–700 words), `MAX_RETRIES=1`, `REQUIRED_HEADERS`, model default, `SEND_TEMPERATURE` gate. |
+| **Prompt** | `writer/prompts/system_v0.1.md` | Still v0.1. Iteration to v≥0.2 is the flagged human-in-the-loop work. |
+
+Both admin endpoints are curl-only — there is no admin UI and none is planned (§ "explicitly
+LATER").
+
+### The three things to do first
+
+**1. Fix the docs that will actively mislead you — 30 minutes.**
+Root `CLAUDE.md` claims Layers 3–5 are spec-only; they're built and merged. Same file
+points at a gitignored driver as "committed". Everything else you decide will be built on
+these two false premises. Also correct the stale stub-writer comments in `fpl/models.py:161`
+and `fpl/__init__.py:5`.
+
+**2. Get the re-skin out of local-only limbo — 30 minutes.**
+`stage-a-reskin` is one unpushed commit holding all the frontend work. Tests pass, build
+passes, its drift note says no contract changed. Merge to main and push, or at minimum
+push the branch. Right now a disk failure loses it, and any deploy from main ships the
+old UI.
+
+**3. Resolve the section-key vocabulary before any paywall work — half a day.**
+Detailed in §5. `_SECTION_KEYS` is coupled to the stub writer's header strings; the LLM
+writer emits four different ones; `chips` is in the frontend contract but no backend path
+produces it. Shipping `PAYWALL_ENABLED` on top of this either advertises a section that
+doesn't exist or fails open and gives the paid tier away free. Add a test asserting every
+`SECTION_ORDER` key is producible by every writer, then build Stage B on solid ground.
+
+**And in parallel, on day one:** start Paddle account verification. It's the only item on
+the critical path whose latency you don't control, and it gates every revenue item in §3.
+
+### Honest assessment
+
+The engineering is in better shape than the documentation. 124 passing offline tests, a
+clean build, careful layer separation, and unusually disciplined drift notes — the specs
+record their own divergences better than most production codebases.
+
+The weak spot is the gap between what the repo *looks* like it does and what it does.
+It reads as a five-layer AI FPL analyst with an LLM writer and a paywall-ready delivery
+surface. It is actually a well-tested deterministic pipeline that renders **template**
+briefs, with an LLM writer that is built, tested, and never called, and a paywall that
+exists as an empty list literal in two places. Nothing is deployed. There is no payments
+integration of any kind.
+
+Distance to a paying customer is roughly **11 developer-days plus Paddle verification** —
+achievable, but not "nearly there", and the section-key defect means one of those days
+has to come before the rest.
+
+---
+
+## 7. Pre-hibernation fix pass — 2026-07-30 (post-audit)
+
+Everything in this section is done, tested, and on `main`. **No Stage B work**: the
+goal was a repo that is safe, truthful, and deployable across a two-month gap — not
+one that takes money.
+
+### ✅ Re-skin preserved (audit §1)
+
+`stage-a-reskin` pushed to origin, merged into `main` with `--no-ff`, main pushed.
+Six stale merged branch pointers deleted (`stage-a-free-tier`, `layer1`…`layer5`).
+The one-local-commit risk is gone.
+
+### ✅ Section-key unification — the paywall-fails-open fix (audit §5)
+
+The defect: three disagreeing vocabularies meant gating on the spec's
+`["bench_plan","chips","watchlist"]` would have matched nothing against LLM output and
+**served the paid product free**, while the lock card advertised a `chips` section no
+writer produced.
+
+- **`graph/sections.py` is now the single vocabulary** — keys, titles, header aliases
+  for both writer formats, the free/paid split, and the preview's separate key set. It
+  lives in `graph/` because `writer/` may import `graph/` and never the reverse, so it
+  is the only package graph/writer/api can share without breaking the boundary rule.
+- **Every producer derives from it.** No `## Header` literal survives in
+  `graph/nodes/writer.py`, `writer/generic.py`, or `writer/config.py`. `web/lib/api.ts`
+  mirrors it, `api/service.py` consumes it.
+- **Gating is an allow-list.** `gate_sections` returns only `FREE_SECTIONS`. A deny-list
+  over paid keys leaks anything the splitter fails to recognise — one LLM typo (`&` to
+  `and`) and paid analysis ships free. The allow-list fails the other way: a paying
+  reader might be missing a section. Wrong in the recoverable direction. Unmappable
+  headers also get an `x_` prefix so they cannot impersonate a canonical key.
+- **`locked_sections` names only sections that exist** (present and non-empty), so the
+  lock card cannot promise content that isn't behind it.
+- **`chips` implemented** in the stub, gated on `chip_stance != "hold"` exactly as
+  layer4 §3 specifies. **`fixtures` folded into `bench_plan`** — it existed only in the
+  stub, the LLM writer could never produce it, and a section only one writer can emit
+  cannot be gated coherently. Its content now renders under "Bench order & the plan",
+  which is where the prompt has always put the four-gameweek outlook. Canonical list is
+  now exactly the spec's six keys; spec, code, and lock-card copy agree for the first
+  time. Dated drift notes added to layer3/layer4/layer5.
+- **`PreviewTeaser` fall-through fixed** — it searched the brief vocabulary, which shares
+  no key with the preview, so it always fell through to whatever key came first. Now
+  ordered by `PREVIEW_ORDER`. Same section rendered, no longer by accident.
+- **`/story`'s Stage B fixture rebuilt.** It hardcoded the exact bug being fixed. It now
+  derives from `PAID_SECTIONS` and includes a real `chips` section, so it demos a state
+  the API can actually produce.
+
+**Test coverage: 155 total, up from 124.** `tests/test_sections.py` (28) is the contract
+suite; `tests/test_graph.py::test_real_stub_output_splits_to_canonical_keys` and
+`::test_chips_section_appears_only_when_stance_is_not_hold` run the **real** graph so the
+literal fixtures cannot drift from the live writer. The three required properties:
+
+| Property | Tests |
+|---|---|
+| (a) every canonical key producible by both writers, one splitter | 5 |
+| (b) gating removes paid content for both writer formats | 6 |
+| (c) unknown header can never leak a lockable section | 7 (5 parametrized drifts) |
+
+`PAYWALL_ENABLED` still does not exist — mechanism only. `api.service.PAYWALL` is a
+`False` constant; Stage A responses are byte-identical. The flip is one line, and it is
+now provably impossible for it to fail open.
+
+### ✅ Documentation truth pass (audit §5 trip hazards)
+
+- **Root `CLAUDE.md` rewritten.** The "only Layers 1–2 exist" claim is gone; all five
+  layers documented with real status. Added a **"Current serving reality"** section
+  stating plainly: briefs are template text, `writer/llm.py` is wired to nothing, no
+  payments exist, the paywall is off, nothing is deployed. Added a section-vocabulary
+  rule and a testing note explaining why the fixtures are hand-written.
+- **The driver claim is now true.** `.gitignore` uses `.claude/*` plus `!.claude/skills/`
+  (git cannot re-include a path whose *parent* is excluded, so `.claude/` would have made
+  the negation a no-op). `driver.py` + `SKILL.md` are committed; `settings.local.json`
+  stays ignored. A fresh clone can now follow its own instructions.
+- **`railway.toml` moved to `docs/railway.toml.deferred`** with an unmissable header. It
+  described an abandoned platform from the repo root, where it read as active config.
+  Kept, not deleted — it is the documented upgrade path.
+- **Stale comments corrected:** `graph/cache.py` (claimed the curated tables don't exist),
+  `fpl/models.py:161` and `fpl/__init__.py:5` (both still credited the Layer 1 stub writer
+  that Layer 2 replaced).
+
+### ✅ Deployment readiness — config only, no accounts (audit §4)
+
+September-you deploys by filling in secrets, not by reverse-engineering prose:
+
+- **`render.yaml`** — Render Blueprint for the launch topology. Secrets are `sync: false`
+  (prompted, never stored in git); `ADMIN_TOKEN` / `BRIEF_TOKEN_SECRET` use
+  `generateValue`. Documents the free-tier sleep and why `RUN_SCHEDULER` must stay unset.
+- **`.env.example`** — every variable the project reads, grouped by layer, each with a
+  comment. Includes the `DATABASE_URL` to `FPL_DATABASE_URL` trap and a clearly-marked
+  Stage B block (Paddle, `PAYWALL_ENABLED`, `BRIEF_TOKEN_SECRET`) noting nothing reads
+  them yet.
+- **`web/.env.example`** — frontend config plus the CORS-must-match warning.
+- **No `vercel.json`** — a standard Next.js app needs none; the root-directory setting is
+  a dashboard step the runbook already covers.
+
+### ✅ Loose ends (audit §3, §5)
+
+- **`fpl/scheduler.py` quarantined in place** with a header explaining it is not running,
+  why (free Render sleeps), that it is the paid-tier alternative and the only
+  deadline-aware implementation, and that running it alongside the Actions cron
+  double-syncs. Kept because deleting it would delete the upgrade path.
+- **`?token=` removed** from `GET /api/brief/{team_id}/{gw}`. It was accepted and ignored;
+  an auth-shaped parameter that does nothing reads as implemented security. FastAPI
+  ignores unknown query params, so no caller breaks. Noted in code, the layer5 spec, and
+  the frontend placeholder page.
+
+### Deliberately NOT done
+
+- **Everything in §3** — checkout, webhooks, `subscriptions`/`webhook_events`, JWT minting,
+  the send job, email templates 1–2, the persisted preview singleton, `PAYWALL_ENABLED`.
+  Stage B, out of scope for this pass. The §3 estimates stand, minus the section-key item
+  (now done), so **~10.5 developer-days** plus Paddle verification.
+- **Wiring `writer/llm.py` into the serving path.** Still the largest gap between
+  perception and reality. Left alone deliberately: it needs prompt iteration and real LLM
+  spend to evaluate, which is not pre-hibernation work. It is now stated plainly in
+  `CLAUDE.md` and the layer4 drift note instead of being implied away.
+- **Backups.** Neon free still has no scheduled backups. Unchanged, still a real gap with
+  a hard deadline at the first season rollover.
+
+### Revised "three things first"
+
+Items 1 and 2 from §6 are done. Replacements:
+
+1. **Start Paddle account verification** — day one. Still the only critical-path item
+   whose latency you don't control, and it gates every revenue item in §3.
+2. **Deploy Stage A from cold** using `render.yaml` + `docs/deploy-stage-a-free.md`.
+   Config exists now, so it is an accounts-and-secrets exercise. Half a day. Nothing
+   about the product is real until it is reachable.
+3. **Decide the LLM question.** Either wire `writer/llm.py` into the serving path and
+   iterate the prompt to v0.2+, or commit to shipping template briefs and stop describing
+   the product as AI-written. Both are defensible; the current in-between is what makes
+   the repo hard to read honestly.

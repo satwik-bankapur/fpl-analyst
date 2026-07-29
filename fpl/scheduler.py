@@ -1,5 +1,21 @@
 """APScheduler wiring for `sync_fpl()` (spec §3 frequency table).
 
+⚠️  NOT RUNNING IN THE LAUNCH TOPOLOGY (quarantined 2026-07-15, still true). ⚠️
+
+    Nothing imports this module unless RUN_SCHEDULER=true, which defaults FALSE
+    (api/config.py) and is NOT set on Render. Sync is driven externally by
+    `.github/workflows/sync.yml` -> POST /api/admin/sync, because a free Render
+    service sleeps after ~15 min idle and an in-process scheduler simply stops
+    existing between requests.
+
+    KEPT, NOT DEAD: this is the paid-tier alternative and the ONLY implementation
+    of the deadline-aware cadence below (the Actions cron runs a flat twice-daily
+    because GitHub cron cannot derive the deadline window from the DB). Restoring
+    it is config-only — set RUN_SCHEDULER=true and DELETE the workflow.
+
+    NEVER RUN BOTH. Two sync drivers on one DB double every sync, and in Stage B
+    every email to a paying customer. See docs/layer5 §8 (2026-07-15).
+
 The cadence is driven by the next unfinished GW's deadline:
 
     | window                              | frequency        |

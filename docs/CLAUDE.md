@@ -57,11 +57,15 @@ docs/     layer specs (source of truth)
 
 ## Delivery invariants (Layer 5)
 
-- **Single Railway replica, hard requirement.** APScheduler runs in-process; a second replica = duplicate syncs and duplicate emails to paying customers. If replicas are ever needed, extract the scheduler first.
+- **Exactly ONE sync driver. Hard requirement.** Duplicate syncs = duplicate emails to paying customers. Two valid topologies, never both at once:
+  - **Launch (free, what runs today):** Render + `.github/workflows/sync.yml` calling `POST /api/admin/sync`. `RUN_SCHEDULER` unset/false — a free Render service sleeps after ~15 min idle and cannot hold APScheduler. Protection comes from the workflow's `concurrency: fpl-sync` group and the single-cron-source rule.
+  - **Paid (deferred):** `RUN_SCHEDULER=true`, in-process APScheduler, single replica, workflow deleted. `docs/railway.toml.deferred` + `docs/deploy-stage-a.md`.
+  Switching is config-only, never a code change. If replicas are ever needed on the paid path, extract the scheduler first.
 - **No accounts in v1.** Identity = email + FPL team ID. Paid access = signed JWT links minted by the send job / checkout handler. Do not add auth, sessions, or a login page.
 - Webhooks: verify `Paddle-Signature` before parsing; idempotency via `webhook_events`. Cancellations keep delivery alive until `current_period_end`.
 - Every bulk email carries one-click `List-Unsubscribe`. Send batch is idempotent via `send_log` unique (email, gw, template).
-- Paywall flips via the `PAYWALL_ENABLED` env flag (Stage A → Stage B), not code changes.
+- Paywall flips via the `PAYWALL_ENABLED` env flag (Stage A → Stage B), not code changes. The flag does not exist yet; the *mechanism* does (`graph.sections.gate_sections`, `api.service.PAYWALL`).
+- **Section keys are defined once, in `graph/sections.py`.** Never hard-code a `## Header` in a writer, never add gating logic to a route. Free-tier gating is an **allow-list** (`FREE_SECTIONS`), never a deny-list over paid keys — a header the splitter cannot map must be *withheld*, not served free. Unmappable headers get an `x_` prefix so they can never impersonate a canonical key. `tests/test_sections.py` fails if either property weakens; fix the vocabulary, not the assertion. Background: docs/layer5 §8 (2026-07-30).
 
 ## Testing expectations
 

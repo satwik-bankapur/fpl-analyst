@@ -1,4 +1,4 @@
-import { SECTION_TITLES } from "@/lib/api";
+import { PREVIEW_TITLES, SECTION_TITLES } from "@/lib/api";
 
 // One 14px icon per brief section, traced from the design's inline SVGs.
 // Keyed by the API's section keys — an unknown key falls back to the clipboard,
@@ -37,7 +37,15 @@ const PATHS: Record<string, JSX.Element> = {
       <circle cx="12" cy="12" r="3" />
     </>
   ),
+  // Calendar — serves the preview's fixtures section and any legacy `fixtures`
+  // key on a brief persisted before the 2026-07-30 vocabulary unification.
   fixtures: (
+    <>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 10h18M8 3v4M16 3v4" />
+    </>
+  ),
+  form_and_fixtures: (
     <>
       <rect x="3" y="5" width="18" height="16" rx="2" />
       <path d="M3 10h18M8 3v4M16 3v4" />
@@ -70,10 +78,10 @@ export function SectionIcon({ name, className }: { name: string; className?: str
   );
 }
 
-/** Backend keys we have no title for (e.g. preview-only sections) read as prose,
- *  not as identifiers: "the_week_ahead" -> "The week ahead". */
+/** Brief titles first, then the preview vocabulary. Anything still unknown reads
+ *  as prose rather than as an identifier: "some_new_key" -> "Some new key". */
 export function sectionTitle(key: string): string {
-  const known = SECTION_TITLES[key];
+  const known = SECTION_TITLES[key] ?? PREVIEW_TITLES[key];
   if (known) return known;
   const words = key.replace(/[_-]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);

@@ -5,8 +5,12 @@ export const dynamic = "force-dynamic";
 
 // Season brief route (§2.2). Stage A generates no season briefs and mints no
 // tokens, so this is a pre-season placeholder; in Stage B this fetches
-// GET /api/brief/{teamId}/{gw}?token= and renders BriefView (with locked cards
-// until checkout). Kept so the route + share links exist from day one.
+// GET /api/brief/{teamId}/{gw} and renders BriefView (with locked cards until
+// checkout). Kept so the route + share links exist from day one.
+//
+// The `?token=` query param the spec shows is NOT accepted by the API today — it
+// was removed on 2026-07-30 rather than left accepted-and-ignored, since nothing
+// mints or verifies a JWT yet. Stage B adds it back with the send job.
 //
 // Styled as the design's "no team" state (§03) because that is what it is today:
 // a team ID that resolves to no brief, with the one route that still works.

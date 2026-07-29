@@ -21,6 +21,7 @@ from graph.data import (
 from graph.fixtures_util import (
     DEFAULT_HORIZON, blanks_and_doubles, swing_score, team_next_fixtures,
 )
+from graph.sections import PREVIEW_TITLES
 
 from .config import PREVIEW_DIFFERENTIALS, PREVIEW_TOP_EP
 
@@ -121,7 +122,10 @@ def render_generic_stub(deps, gameweek=None) -> str:
     def nm(pid): return players.get(pid, {}).get("web_name", f"#{pid}")
     def short(tid): return teams.get(tid, {}).get("short_name", str(tid))
 
-    L = [f"# Gameweek {g['anchor']} — the week ahead", "", "## The week ahead"]
+    # Headers come from graph.sections.PREVIEW_TITLES — the preview has its own
+    # vocabulary, deliberately disjoint from the brief's lockable SECTION_ORDER.
+    L = [f"# Gameweek {g['anchor']} — the week ahead", "",
+         f"## {PREVIEW_TITLES['the_week_ahead']}"]
     if g["most_captained"]:
         L.append(f"The crowd is on {nm(g['most_captained'])} for the armband.")
     top = g["top_ep"]
@@ -129,7 +133,7 @@ def render_generic_stub(deps, gameweek=None) -> str:
         L.append("Top projected points over the next four: "
                  + ", ".join(f"{nm(pid)} ({_r(e['ep_next4'])})" for pid, e in top[:5]) + ".")
 
-    L.append("\n## Form and fixtures")
+    L.append(f"\n## {PREVIEW_TITLES['form_and_fixtures']}")
     if g["entering"]:
         L.append("Fixtures turning kind for: " + ", ".join(short(t) for t in g["entering"]) + ".")
     if g["leaving"]:
@@ -139,12 +143,12 @@ def render_generic_stub(deps, gameweek=None) -> str:
     for b in g["blanks"]:
         L.append(f"Blank gameweek {b['gw']}: " + ", ".join(short(t) for t in b["team_ids"]) + ".")
 
-    L.append("\n## The differentials")
+    L.append(f"\n## {PREVIEW_TITLES['the_differentials']}")
     for pid, e in g["differentials"]:
         L.append(f"- {nm(pid)} ({short(players[pid]['team_id'])}), "
                  f"{_r(players[pid]['ownership_pct'])}% owned, {_r(e['ep_next4'])} over four.")
 
-    L.append("\n## Trap of the week")
+    L.append(f"\n## {PREVIEW_TITLES['trap_of_the_week']}")
     if g["trap"]:
         tp, te = g["trap"]
         L.append(f"{nm(tp)} is in {_r(players[tp]['ownership_pct'])}% of squads, but the model "

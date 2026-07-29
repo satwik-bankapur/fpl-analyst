@@ -253,3 +253,47 @@ contract change** — it records where the *design* was not followed literally, 
   claiming knowledge it does not have. Upgrade path is noted in the component.
 - **`/privacy` added.** The design's footer links to it from every page and the product collects
   email addresses; a 404 there would have been a bug, not a re-skin. Static, no data.
+
+**2026-07-30 — Section vocabulary unified; paywall made provably fail-closed. Pre-hibernation pass.**
+
+§1.1 shows `locked_sections: ["bench_plan","chips","watchlist"]`. Shipping that literally
+against the code as it stood would have **served the entire paid product for free**. This
+note records the fix. Nothing here is a response shape change — the §1.1 JSON is identical.
+
+- **The vocabulary was defined three times and the three disagreed.** `api._SECTION_KEYS`
+  mapped the Layer 3 stub's headers (`## Verdict`, `## Transfer`, `## Bench order`); the
+  Layer 4 prompt emits different text (`## The verdict`, `## This week's transfer`,
+  `## Bench order & the plan`); `web/lib/api.ts` carried a seventh key (`chips`) no backend
+  path produced, plus `fixtures`, which the spec never listed. Unmapped headers were slugged
+  (`head.lower().replace(" ", "_")`), so against LLM output four of six keys silently
+  changed. Gating on the §1.1 list would have matched **nothing** — a fail-OPEN paywall —
+  while the lock card advertised a `chips` section that did not exist.
+- **One source of truth: `graph/sections.py`.** Keys, titles, header aliases for BOTH writer
+  formats, the free/paid split, and the preview's separate vocabulary. `graph/` is the only
+  home that respects the import direction (`writer/` may import `graph/`, never the reverse).
+  `writer/config`, `writer/generic`, `graph/nodes/writer`, `api/service` and `web/lib/api.ts`
+  all derive from it; no `## Header` literal survives in any producer.
+- **Gating is an ALLOW-LIST, not a deny-list.** `gate_sections` returns only keys in
+  `FREE_SECTIONS`. A deny-list over `PAID_SECTIONS` leaks any header the splitter fails to
+  recognise — one LLM typo (`&` → `and`) and paid analysis ships free. The allow-list fails
+  the other way: a paying reader might miss a section. Wrong in the recoverable direction.
+  Unmappable headers additionally get an `x_` prefix so they cannot impersonate a free key.
+- **`locked_sections` now names only sections that actually exist** (present AND non-empty),
+  so the lock card can never promise content that is not behind it.
+- **`chips` implemented, `fixtures` folded into `bench_plan`** — see the Layer 4 §8 note.
+  The canonical list is now exactly §1.1's: `verdict, transfer, captaincy, bench_plan,
+  chips, watchlist`. Spec, code, and lock-card copy agree for the first time.
+- **`PAYWALL_ENABLED` still does not exist** — this was mechanism-only work. `api.service.PAYWALL`
+  is a `False` constant and Stage A responses are unchanged (`locked_sections: []`). The flip
+  is one line, and `tests/test_sections.py` (28 tests) proves it cannot fail open first.
+- **`?token=` removed from `GET /api/brief/{team_id}/{gw}`.** It was accepted and ignored;
+  nothing mints or verifies a JWT. An auth-shaped parameter that does nothing reads as
+  implemented security. Stage B adds it back with the send job. FastAPI ignores unknown
+  query params, so any early caller still gets the free view.
+- **`PreviewTeaser` ordered by the brief vocabulary**, which shares no key with the preview,
+  so the lookup never matched and it fell through to whatever key came first. Now uses
+  `PREVIEW_ORDER`. Same section rendered, no longer by accident.
+- **Deployment config committed** (`render.yaml`, `.env.example`, `web/.env.example`). The
+  launch topology previously existed only as runbook prose. `railway.toml` moved to
+  `docs/railway.toml.deferred` — it described an abandoned platform from the repo root,
+  where it read as active config.
