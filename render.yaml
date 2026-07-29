@@ -1,0 +1,62 @@
+# Render Blueprint — the Stage A LAUNCH topology (docs/deploy-stage-a-free.md).
+#
+# Free tier, so read this before trusting it:
+#   * The service SLEEPS after ~15 min idle. First request after a sleep pays a
+#     ~1 min cold start. That is why `.github/workflows/sync.yml` pings /api/health
+#     before it calls the sync endpoint — and why a real user's first brief request
+#     can be slow. Not a bug; the documented free-tier cost.
+#   * There is NO in-process scheduler here. RUN_SCHEDULER is deliberately unset
+#     (defaults false in api/config.py) because a sleeping service cannot hold
+#     APScheduler between requests. Sync is driven externally by the Actions cron.
+#     NEVER set RUN_SCHEDULER=true while that workflow exists — two sync drivers on
+#     one DB is the duplicate-sync failure the single-replica invariant prevents.
+#
+# `sync: false` on a var means "Render prompts for it, never stored in git".
+# Everything with a real value here is non-secret by design.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> point at this repo.
+services:
+  - type: web
+    name: fpl-analyst-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    # init-db applies Alembic migrations (idempotent), then serves. Schema is
+    # Alembic-only — never add Base.metadata.create_all to a startup path.
+    buildCommand: pip install -e .
+    startCommand: python -m fpl init-db && uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13"
+
+      # --- database -------------------------------------------------------
+      # Spec §5 calls this DATABASE_URL; the engine is owned by Layer 1, so the
+      # real name is FPL_DATABASE_URL (fpl/config.py). Paste the Neon pooled
+      # connection string. Must start with postgresql:// (not postgres://).
+      - key: FPL_DATABASE_URL
+        sync: false
+
+      # --- delivery surface (api/config.py, bare spec names) --------------
+      # Exact Vercel production origin, no trailing slash. Single-origin CORS
+      # allow-list, so Vercel PREVIEW deploys get other hostnames and will fail
+      # CORS against this API. Expected, documented in the runbook §5.
+      - key: FRONTEND_ORIGIN
+        sync: false
+      # Bearer token guarding /api/admin/*, incl. the sync endpoint the cron calls.
+      # Must match the ADMIN_TOKEN repo secret in GitHub Actions.
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # Empty key => api/mail.py is a logged no-op. Safe launch default: Resend's
+      # shared resend.dev sender only delivers to your own verified address.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SEND_FROM
+        value: FPL Analyst <onboarding@resend.dev>
+
+      # --- Stage B placeholders (unused today; see docs/layer5 §6) --------
+      # Left here so the Stage B flip is "fill in values", not "rediscover which
+      # vars exist". BRIEF_TOKEN_SECRET mints nothing until the send job lands.
+      - key: BRIEF_TOKEN_SECRET
+        generateValue: true
