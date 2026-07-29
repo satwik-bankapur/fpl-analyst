@@ -3,9 +3,39 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
 }
 
 body {
-  @apply bg-slate-50 text-ink antialiased;
+  @apply bg-surface-950 text-ink-0 antialiased;
+}
+
+::placeholder {
+  @apply text-ink-700;
+}
+
+/* Focus ring: the palette has no dedicated focus hue, so state-blue does the
+   job everywhere. Keyboard-only, so it never fights the design's flat chrome. */
+:focus-visible {
+  @apply outline-none ring-2 ring-state-blue ring-offset-2 ring-offset-surface-900;
+}
+
+@layer components {
+  /* The three button shapes the design uses, nothing more. */
+  .btn-primary {
+    @apply rounded-btn bg-ink-0 px-4 py-3 text-body font-semibold text-ink-inverse
+           transition-colors hover:bg-[#D9D9D6] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-ghost {
+    @apply rounded-btn border border-line-strong bg-transparent px-4 py-3 text-label font-semibold
+           text-ink-0 transition-colors hover:bg-surface-700 disabled:opacity-40;
+  }
+  .field {
+    @apply w-full rounded border border-line-strong bg-surface-800 px-[13px] py-3
+           text-[15px] text-ink-0 transition-colors focus:border-ink-700;
+  }
+  /* Card = the chrome. Prose inside it is the product; see .prose-brief. */
+  .card {
+    @apply rounded-card border border-line bg-surface-800;
+  }
 }

@@ -3,57 +3,93 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import DraftPicker from "@/components/DraftPicker";
+import { Eyebrow } from "@/components/Chrome";
 
 // Mode-driven hero (§2.1). PRESEASON: "Rate my draft" -> picker modal (Stage A
 // primary). IN_SEASON: team-ID input -> /brief/[teamId] (Stage B primary). The
 // switch is data-driven off /api/health.mode, so the Stage B flip needs no change.
-export default function HomeHero({ mode }: { mode: "PRESEASON" | "IN_SEASON" }) {
+//
+// Design §01: one promise and one input above the fold, centred, with an eyebrow
+// carrying the live gameweek state and a footnote carrying the price (free).
+export default function HomeHero({
+  mode,
+  nextGw,
+  deadline,
+}: {
+  mode: "PRESEASON" | "IN_SEASON";
+  nextGw?: number | null;
+  deadline?: string | null;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [teamId, setTeamId] = useState("");
 
-  return (
-    <div>
-      <h1 className="text-4xl font-extrabold tracking-tight text-ink sm:text-5xl">
-        Your FPL team, scouted like a pro.
-      </h1>
-      <p className="mt-4 max-w-xl text-lg text-slate-600">
-        Paste your team — or draft one now, pre-season — and get a scout report:
-        the verdict, the transfer, the captain. Free.
-      </p>
+  const when = deadline
+    ? new Date(deadline).toLocaleString("en-GB", {
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "UTC",
+      }) + " GMT"
+    : null;
 
-      <div className="mt-8">
-        {mode === "PRESEASON" ? (
-          <button
-            onClick={() => setOpen(true)}
-            className="rounded-lg bg-pitch px-6 py-3 text-lg font-semibold text-white shadow hover:opacity-90"
-          >
+  // Only states the backend actually reported — no invented gameweek or deadline.
+  const kicker =
+    mode === "PRESEASON"
+      ? ["Pre-season", nextGw && `GW${nextGw} deadline${when ? ` ${when}` : ""}`].filter(Boolean).join(" · ")
+      : [nextGw ? `Gameweek ${nextGw}` : "This gameweek", when && `deadline ${when}`].filter(Boolean).join(" · ");
+
+  return (
+    <div className="px-5 py-8 text-center sm:px-12 sm:pb-12 sm:pt-16">
+      <Eyebrow>{kicker}</Eyebrow>
+
+      {mode === "PRESEASON" ? (
+        <>
+          <h1 className="mx-auto mb-2.5 mt-3.5 max-w-[26ch] text-balance text-hero font-bold text-ink-0 sm:text-display">
+            Your draft, marked before it costs you
+          </h1>
+          <p className="mx-auto mb-5 max-w-[52ch] text-pretty text-prose leading-[1.55] text-ink-500 sm:text-[18px]">
+            Build your 15 in a minute. Get a written verdict on the shape, the spend and the two picks
+            you&apos;ll regret by September.
+          </p>
+          <button onClick={() => setOpen(true)} className="btn-primary w-full py-3.5 sm:w-auto sm:px-8">
             Rate my draft
           </button>
-        ) : (
+          <p className="m-0 mt-3 text-label text-ink-700">Free · no signup · 15 players, £100.0m</p>
+        </>
+      ) : (
+        <>
+          <h1 className="mx-auto mb-2.5 mt-3.5 max-w-[26ch] text-balance text-hero font-bold text-ink-0 sm:text-display">
+            Your personal FPL analyst
+          </h1>
+          <p className="mx-auto mb-5 max-w-[52ch] text-pretty text-prose leading-[1.55] text-ink-500 sm:text-[18px]">
+            Paste your team ID. Get a scout report on your squad — what to fix, who to captain, and why.
+          </p>
           <form
             onSubmit={(e) => {
               e.preventDefault();
               if (teamId.trim()) router.push(`/brief/${teamId.trim()}`);
             }}
-            className="flex flex-col gap-2 sm:flex-row"
+            className="mx-auto flex max-w-[520px] gap-2"
           >
             <input
               value={teamId}
               onChange={(e) => setTeamId(e.target.value)}
               inputMode="numeric"
-              placeholder="Your FPL team ID"
-              className="rounded-lg border border-slate-300 px-4 py-3"
+              aria-label="Your FPL team ID"
+              placeholder="Your FPL team ID, e.g. 2417380"
+              className="field flex-1"
             />
-            <button className="rounded-lg bg-pitch px-6 py-3 font-semibold text-white hover:opacity-90">
-              Get my free brief
-            </button>
+            <button className="btn-primary whitespace-nowrap px-4">Get my free brief</button>
           </form>
-        )}
-        <p className="mt-2 text-sm text-slate-500">
-          Find your ID in your FPL points-page URL.
-        </p>
-      </div>
+          <p className="m-0 mt-3.5 text-label text-ink-700">
+            Free · no signup · takes 20 seconds ·{" "}
+            <button onClick={() => setOpen(true)} className="text-ink-500 underline hover:text-ink-0">
+              pre-season? rate a draft instead
+            </button>
+          </p>
+        </>
+      )}
 
       {open && <DraftPicker onClose={() => setOpen(false)} />}
     </div>

@@ -204,3 +204,52 @@ actually runs on.
   delivers to your own verified address, so real signups can't receive the welcome mail until
   a domain is verified. The unkeyed no-op path (`RESEND_API_KEY` empty) remains the honest
   free-launch default.
+
+**2026-07-28 — Stage A frontend re-skinned to `docs/Design/fpl-scout-report-design`. No contract changed.**
+
+The `web/` layer was restyled to the "FPL Scout Report v2" design bundle. This was a re-skin,
+not a rewrite: every API contract, the section vocabulary, the `locked_sections` mechanism, the
+picker rules and the mode-driven hero survive byte-for-byte. **Nothing in this note is a
+contract change** — it records where the *design* was not followed literally, and why.
+
+- **Design theme adopted wholesale.** The bundle's §05 ships a `tailwind.config` block; it is
+  transcribed into `web/tailwind.config.ts` (surfaces/ink/state/out/in scales, the named type
+  scale, `maxWidth.measure = 64ch`). Colours and sizes are theme tokens, not inline utilities.
+  Instrument Sans is self-hosted via `next/font/google` — no new runtime dependency, and no
+  external font request from the deployed page.
+- **Section display titles changed; section KEYS and ORDER did not.** `SECTION_TITLES` now
+  reads "The verdict" / "This week's transfer" / "Bench order & the plan" etc. to match the
+  design. `SECTION_ORDER` and the keys the renderer splits on
+  (`verdict, transfer, captaincy, bench_plan, chips, watchlist, fixtures`) are untouched.
+  Unknown keys from the backend now humanise (`the_week_ahead` → "The week ahead") instead of
+  rendering as raw identifiers.
+- **One lock card per RUN of consecutive locked keys, not one per key.** The design shows a
+  single "In the full brief" card naming everything behind it. `BriefView` groups adjacent
+  `locked_sections` entries into one `LockCard` and lists their titles. Still driven purely by
+  the API response — Stage A's `locked_sections: []` produces zero lock cards, and a Stage B
+  response producing non-adjacent locks still yields separate cards. `/story` exercises both.
+- **Three design elements were deliberately NOT built, because the data to back them does not exist:**
+  - *"4,102 drafts marked · ~55s to build a squad"* stats row — no metric source; would be invented.
+  - *"1 free transfer"* in the header pill — free-transfer counts are not exposed by the public
+    FPL API (Layer 1 invariant: assume 1, emit a warning, never silently fudge). The pill shows
+    only `£X.Xm ITB`, which the response actually carries, and is omitted when `bank` is null.
+  - *"Sign in"* nav item — no accounts in v1 (§Delivery invariants). Omitted rather than stubbed.
+- **`gameweek: 0` renders as "Pre-season draft brief".** The API's pre-season anchor is 0; the
+  old UI printed "GW0", which is not a thing a user recognises. Display-only, in `BriefView`
+  and the OG title. The field is unchanged.
+- **`postSignup` gained a `source` argument** (default `"landing"`, brief page sends
+  `"draft_brief"`). The `source` field already existed in `SignupRequest`; the frontend was
+  hardcoding one value, so per-surface attribution was impossible. Additive, backend untouched.
+- **Picker row cap is now per position, not global — this was a live bug.** The pool was capped
+  at the first 250 filtered players. Once the list was grouped by position (as the design
+  requires), that cap provably filled with goalkeepers and defenders and made **forwards
+  unreachable without typing a search**. The cap is now `ROWS_PER_POS = 60` per group, and
+  picked players are pinned into view even when they fall outside the cap or the active search,
+  so they can always be captained or removed.
+- **Long-wait loading state is timer-driven, and honestly so.** `POST /api/brief` is a single
+  opaque request with no progress to report, so the staged lines advance on a schedule
+  (0s / 3s / 14s), the "while you wait" line rotates every 9s, and the cold-start note appears
+  at 10s. It is built to hold attention for the ~50s Render free-tier cold start without
+  claiming knowledge it does not have. Upgrade path is noted in the component.
+- **`/privacy` added.** The design's footer links to it from every page and the product collects
+  email addresses; a 404 there would have been a bug, not a re-skin. Static, no data.

@@ -1,4 +1,5 @@
-import Link from "next/link";
+import { SiteHeader, SiteFooter } from "@/components/Chrome";
+import NotFoundState from "@/components/NotFoundState";
 
 export const dynamic = "force-dynamic";
 
@@ -6,17 +7,34 @@ export const dynamic = "force-dynamic";
 // tokens, so this is a pre-season placeholder; in Stage B this fetches
 // GET /api/brief/{teamId}/{gw}?token= and renders BriefView (with locked cards
 // until checkout). Kept so the route + share links exist from day one.
+//
+// Styled as the design's "no team" state (§03) because that is what it is today:
+// a team ID that resolves to no brief, with the one route that still works.
 export default function TeamBriefPage({ params }: { params: { teamId: string } }) {
   return (
-    <main className="mx-auto max-w-2xl px-6 py-24 text-center">
-      <h1 className="text-2xl font-bold">Season briefs start at GW1</h1>
-      <p className="mt-3 text-slate-600">
-        Team {params.teamId} isn&apos;t playing yet — it&apos;s pre-season. Rate your draft
-        instead and we&apos;ll have your GW1 brief ready when the season opens.
-      </p>
-      <Link href="/" className="mt-6 inline-block rounded-lg bg-pitch px-6 py-3 font-semibold text-white">
-        Rate my draft
-      </Link>
-    </main>
+    <div className="flex min-h-screen flex-col">
+      <SiteHeader />
+      <main className="mx-auto flex w-full max-w-[560px] flex-1 flex-col">
+        <NotFoundState
+          kicker={`No brief yet · ID ${params.teamId}`}
+          title="Season briefs start at GW1."
+          hint={
+            <>
+              Your team ID is the number in the URL when you open <em>Points</em> on the FPL site:{" "}
+              <br />
+              fantasy.premierleague.com/entry/
+              <span className="font-bold text-ink-0">{params.teamId}</span>/event/1
+            </>
+          }
+          cta={{ href: "/", label: "Rate my draft instead" }}
+        >
+          <p className="m-0">
+            It&apos;s pre-season, so team {params.teamId} has no gameweek to be scouted on yet. Rate your draft
+            now and the GW1 brief will be ready when the season opens.
+          </p>
+        </NotFoundState>
+      </main>
+      <SiteFooter />
+    </div>
   );
 }

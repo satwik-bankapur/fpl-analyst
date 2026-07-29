@@ -75,21 +75,25 @@ export function getDraftBrief(draftId: string): Promise<Brief> {
   return fetch(`${API}/api/brief/draft/${draftId}`, { cache: "no-store" }).then(json<Brief>);
 }
 
-export function postSignup(email: string, teamId?: number | null): Promise<{ ok: boolean }> {
+// `source` tags where the address was captured (landing hero, brief footer, …)
+// so signup volume can be attributed per surface. The backend takes any string.
+export function postSignup(email: string, teamId?: number | null, source = "landing"): Promise<{ ok: boolean }> {
   return fetch(`${API}/api/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, team_id: teamId ?? null, source: "landing" }),
+    body: JSON.stringify({ email, team_id: teamId ?? null, source }),
   }).then(json<{ ok: boolean }>);
 }
 
 // Canonical section order + display titles (shared by BriefView / preview).
+// The KEYS and their ORDER are the API contract — the renderer splits on them.
+// Only the display strings below changed in the re-skin, to the design's labels.
 export const SECTION_ORDER = ["verdict", "transfer", "captaincy", "bench_plan", "chips", "watchlist", "fixtures"];
 export const SECTION_TITLES: Record<string, string> = {
-  verdict: "Verdict",
-  transfer: "Transfer",
+  verdict: "The verdict",
+  transfer: "This week's transfer",
   captaincy: "Captaincy",
-  bench_plan: "Bench order",
+  bench_plan: "Bench order & the plan",
   chips: "Chips",
   watchlist: "Watchlist",
   fixtures: "Fixture notes",
