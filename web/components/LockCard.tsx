@@ -8,6 +8,12 @@ import { SectionIcon } from "@/components/SectionLabel";
 // Design §04: one card standing in for a run of locked sections, naming exactly
 // what is behind it. `titles` comes straight from the locked keys, so the card
 // always tells the truth about which sections the API withheld.
+//
+// That truthfulness is enforced on the backend, not here: `gate_sections`
+// (graph/sections.py) only names a section in `locked_sections` if it was really
+// produced AND non-empty. Before 2026-07-30 the spec's literal
+// ["bench_plan","chips","watchlist"] would have made this card advertise a `chips`
+// section no writer emitted. Do not "helpfully" pad `titles` from a static list.
 export default function LockCard({ titles }: { titles: string[] }) {
   return (
     <section className="mt-6 rounded-[11px] border border-line-strong bg-surface-900 p-4 text-center sm:p-5">

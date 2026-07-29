@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 
+from graph.sections import SECTION_TITLES
+
 # --- payload / model budget (§2) -------------------------------------------
 PAYLOAD_MAX_TOKENS = 3500          # hard input budget; enforced by drop order
 OUTPUT_MAX_TOKENS = 1200           # generation cap
@@ -28,14 +30,16 @@ LENGTH_MAX_WORDS = 700
 MAX_RETRIES = 1                    # one evidence-appended retry, then stub fallback
 
 # --- output structure (§3) -------------------------------------------------
+# Derived from graph.sections — the ONE section vocabulary (writer/ may import
+# graph/, never the reverse). Never hard-code a header string here again.
 REQUIRED_HEADERS = [
-    "## The verdict",
-    "## Captaincy",
+    f"## {SECTION_TITLES['verdict']}",
+    f"## {SECTION_TITLES['captaincy']}",
 ]
 # The transfer header varies by action; verdict + captaincy are always required and
-# ordered. Paid-only sections (bench/chips/watchlist) are generated but gated at
-# render time, so they are not *required* by the validator.
-TRANSFER_HEADERS = ("## This week's transfer", "## Roll the transfer")
+# ordered. Paid-only sections (bench_plan/chips/watchlist) are generated but gated
+# at render time, so they are not *required* by the validator.
+TRANSFER_HEADERS = (f"## {SECTION_TITLES['transfer']}", "## Roll the transfer")
 
 # --- generic preview (§6) --------------------------------------------------
 PREVIEW_TOP_EP = 8

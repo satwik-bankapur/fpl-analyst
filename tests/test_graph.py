@@ -27,6 +27,9 @@ from graph import BriefState, run_brief
 from graph.cache import compute_input_hash, get_or_generate
 from graph.data import resolve_ep_anchor
 from graph.deps import Deps
+from graph.sections import (
+    FREE_SECTIONS, PAID_SECTIONS, UNKNOWN_PREFIX, gate_sections, split_sections,
+)
 from graph.state import (
     Decisions, Diagnosis, FixtureOutlook, MarketScan, RequestCtx, SquadCtx,
 )
@@ -127,6 +130,54 @@ def test_golden_path_preseason_draft_end_to_end(golden):
     assert isinstance(final.decisions, Decisions)
     assert final.squad.overall_rank is None          # pre-season has no rank
     assert final.brief_md.startswith("# FPL Brief")
+
+
+def test_real_stub_output_splits_to_canonical_keys(golden):
+    """The link between tests/test_sections.py's literal fixtures and reality.
+
+    Those fixtures are hand-written on purpose, so they cannot prove the LIVE
+    writer still emits mappable headers. This runs the real graph and asserts its
+    real markdown splits cleanly — if the stub's headers ever drift from
+    graph.sections, this fails even though the literal-fixture tests pass.
+    """
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+
+    sections = split_sections(final.brief_md)
+    unknown = [k for k in sections if k.startswith(UNKNOWN_PREFIX)]
+    assert not unknown, f"live stub emitted unmappable headers: {unknown}"
+
+    # The always-present sections. `chips` is conditional on chip_stance, so it is
+    # asserted in test_sections.py against a literal instead.
+    assert {"verdict", "transfer", "captaincy", "bench_plan", "watchlist"} <= set(sections)
+    assert all(sections[k].strip() for k in FREE_SECTIONS)
+
+    # And the paywall genuinely holds against real output, not just fixtures.
+    visible, locked = gate_sections(sections, paywall=True)
+    assert sorted(visible) == sorted(FREE_SECTIONS)
+    assert set(locked) <= set(PAID_SECTIONS)
+    blob = "\n".join(visible.values())
+    for key in locked:
+        for line in sections[key].splitlines():
+            if line.strip():
+                assert line.strip() not in blob
+
+
+def test_chips_section_appears_only_when_stance_is_not_hold(golden):
+    """`chips` is spec'd as conditional (layer4 §3). Rendering it on a plain hold
+    would put an empty paid section on the lock card."""
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+
+    sections = split_sections(final.brief_md)
+    if final.decisions.chip_stance == "hold":
+        assert "chips" not in sections
+    else:
+        assert sections["chips"].strip()
 
 
 def test_state_serializes_under_50kb_and_fast(golden):

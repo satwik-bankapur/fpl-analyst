@@ -21,21 +21,19 @@ from graph.cache import get_or_generate
 from graph.data import load_teams
 from graph.deps import Deps
 from graph.nodes.squad_analyst import resolve_squad
+from graph.sections import PREVIEW_HEADERS, gate_sections, split_sections
 from graph.state import BriefState, RequestCtx
 from writer.generic import render_generic_stub
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
-# brief_md `## ` headers -> canonical section keys. Forward-compatible with the
-# Stage B locked_sections vocabulary; unknown headers fall back to a slug.
-_SECTION_KEYS = {
-    "Verdict": "verdict",
-    "Transfer": "transfer",
-    "Captaincy": "captaincy",
-    "Bench order": "bench_plan",
-    "Watchlist": "watchlist",
-    "Fixture notes": "fixtures",
-}
+# Stage A ships no paywall: every brief returns in full with `locked_sections: []`
+# (layer5 §6). The GATING MECHANISM is built and proven fail-closed
+# (`graph.sections.gate_sections` + tests/test_sections.py) so the Stage B flip is
+# a one-line change here — replace this constant with the PAYWALL_ENABLED env
+# setting. Do NOT reintroduce per-route gating logic; it lives in one function on
+# purpose, because the allow-list is only auditable in one place.
+PAYWALL = False
 
 
 # --- FastAPI dependency ----------------------------------------------------
@@ -73,26 +71,6 @@ def _preseason_state(draft_id: uuid.UUID) -> BriefState:
         requested_at=datetime.now(timezone.utc)))
 
 
-def split_sections(brief_md: str) -> dict[str, str]:
-    """brief_md -> {section_key: markdown}. Header card lines (before the first
-    `## `) are dropped — the response carries team/rank/bank as structured fields."""
-    out: dict[str, str] = {}
-    key: str | None = None
-    buf: list[str] = []
-    for line in brief_md.splitlines():
-        if line.startswith("## "):
-            if key is not None:
-                out[key] = "\n".join(buf).strip()
-            head = line[3:].strip()
-            key = _SECTION_KEYS.get(head, head.lower().replace(" ", "_"))
-            buf = []
-        elif key is not None:
-            buf.append(line)
-    if key is not None:
-        out[key] = "\n".join(buf).strip()
-    return out
-
-
 def _brief_id(session, req: RequestCtx) -> int | None:
     if req.draft_id is not None:
         return session.scalar(select(Brief.id).where(Brief.draft_id == req.draft_id))
@@ -108,6 +86,7 @@ def _shape(deps: Deps, state: BriefState, final: BriefState, cached: bool) -> di
         squad, _ = resolve_squad(state, deps)
     with deps.session_factory() as session:
         brief_id = _brief_id(session, state.request)
+    sections, locked = gate_sections(split_sections(final.brief_md), paywall=PAYWALL)
     return {
         "brief_id": brief_id,
         "draft_id": str(state.request.draft_id) if state.request.draft_id else None,
@@ -115,8 +94,8 @@ def _shape(deps: Deps, state: BriefState, final: BriefState, cached: bool) -> di
         "team_name": squad.team_name if squad else None,
         "overall_rank": squad.overall_rank if squad else None,
         "bank": squad.bank if squad else None,
-        "sections": split_sections(final.brief_md),
-        "locked_sections": [],  # Stage A: no paywall (Stage B populates this)
+        "sections": sections,
+        "locked_sections": locked,
         "cached": cached,
     }
 
@@ -158,14 +137,15 @@ def get_team_brief(deps: Deps, team_id: int, gw: int) -> dict | None:
         ).first()
         if row is None:
             return None
+        sections, locked = gate_sections(split_sections(row.brief_md), paywall=PAYWALL)
         return {
             "brief_id": row.id,
             "gameweek": row.gameweek,
             "team_name": None,
             "overall_rank": None,
             "bank": None,
-            "sections": split_sections(row.brief_md),
-            "locked_sections": [],
+            "sections": sections,
+            "locked_sections": locked,
             "cached": True,
         }
 
@@ -202,7 +182,9 @@ def preview(deps: Deps, gameweek: int | None = None) -> dict:
         gw = int("".join(c for c in first if c.isdigit()) or 0)
     return {
         "gameweek": gw,
-        "sections": split_sections(md),
+        # The preview has its OWN vocabulary (never lockable) — passing
+        # PREVIEW_HEADERS keeps its keys explicit instead of accidentally slugged.
+        "sections": split_sections(md, PREVIEW_HEADERS),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
