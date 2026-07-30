@@ -43,7 +43,30 @@ One-click unsubscribe (required for bulk-sender deliverability). Sets `email_sig
 
 ### 1.9 Utility
 - `GET /api/health` → sync freshness `{ last_sync, mode, next_deadline }` (also your uptime-monitor target).
-- `POST /api/admin/notes` and `POST /api/admin/euro-weeks` — bearer `ADMIN_TOKEN` header; upsert rows in `team_notes` / `european_weeks`. No admin UI in v1: you call these from a local script/HTTP file. (Editing prod SQL by hand is the alternative; the endpoint exists so updates bump `updated_at` correctly for cache keys.)
+- `POST /api/admin/notes` and `POST /api/admin/euro-weeks` — bearer `ADMIN_TOKEN` header; upsert rows in `team_notes` / `european_weeks`. ~~No admin UI in v1: you call these from a local script/HTTP file.~~ (Editing prod SQL by hand is the alternative; the endpoint exists so updates bump `updated_at` correctly for cache keys.)
+
+> **DRIFT 2026-07-30 — an admin UI shipped after all; both write endpoints gained a
+> skip-if-identical guard.**
+>
+> The curl-only workflow held for two curated tables edited weekly by hand, and stopped
+> holding once the volume was twenty notes a week. `/admin` now exists inside the same
+> Next.js app (four pages, `ADMIN_TOKEN` in `localStorage`, never linked, `noindex`), backed
+> by a read-only query module `api/admin.py` and these new token-gated reads:
+> `GET /api/admin/{overview,notes,euro-weeks,players,fixtures/{team_short},top}`, plus
+> `POST /api/admin/euro-weeks/replace` for whole-grid saves. Full description in
+> `docs/STATUS.md` §6.
+>
+> **The parenthetical above had it exactly backwards, and that is the load-bearing part
+> of this note.** "The endpoint exists so updates bump `updated_at` correctly for cache
+> keys" — but `updated_at` bumping on *every* call is the bug, not the feature, the moment
+> a form is doing the calling: a form re-submits its contents whether or not anything was
+> typed, so an unchanged save invalidated every cached brief. `upsert_note`,
+> `upsert_euro_week` and `replace_euro_weeks` now compare before writing and skip if
+> identical, returning `changed` so the caller can tell a save from a no-op. A curl caller
+> sending genuinely new content is unaffected.
+>
+> Still NOT here, still deliberate: no accounts, no sessions, no login page. `/admin` is
+> the existing operator token behind one prompt — §5's "no auth" rule is intact.
 
 ### 1.10 New table: `subscriptions`
 | field | type |
@@ -129,7 +152,7 @@ Manual (the entire human surface, by design): `team_notes` weekly, `european_wee
 - Flip: team-ID input replaces draft picker as primary; paywall gating on (locked sections render); Paddle checkout + webhooks live (Paddle account verification started NOW — §7 note); weekly batch + sends armed; free preview email begins.
 - The Stage A email list gets one launch email: "the season's here — your GW1 brief is ready, here's what the full version adds."
 
-**Explicitly LATER (not v1, resist scope creep):** login/accounts, multi-team support, brief history page, chip planner, price-change predictions (that's what `player_history` accrues for), LLM Strategist, mini-league features, Indian-rail payment tier, admin UI.
+**Explicitly LATER (not v1, resist scope creep):** login/accounts, multi-team support, brief history page, chip planner, price-change predictions (that's what `player_history` accrues for), LLM Strategist, mini-league features, Indian-rail payment tier, ~~admin UI~~ (built 2026-07-30 — see the §1.9 drift note; it is an operator console over the endpoints that already existed, not a new product surface, and it added no accounts).
 
 ## 7. Sequencing note for the implementer
 Build order: routes 1.1–1.5 + frontend pages against the stub Writer → email module + welcome flow → Stage A ship → Paddle sandbox integration (checkout + webhooks end-to-end in sandbox) → templates 1–2 → Stage B flip behind a single `PAYWALL_ENABLED` env flag. Start Paddle account onboarding/verification in parallel with Stage A — provider verification latency is the only item on the critical path you don't control.

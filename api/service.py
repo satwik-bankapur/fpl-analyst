@@ -28,6 +28,24 @@ from writer.generic import render_generic_stub
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
+
+def iso_utc(dt: datetime | None) -> str | None:
+    """ISO-8601 with an explicit UTC offset — never a naive string.
+
+    Every timestamp column is written with `models.utcnow()`, i.e. aware UTC, but
+    SQLite drops the tzinfo on the way back out (Postgres does not). Serializing
+    the naive value as-is produces "2026-07-30T14:19:55", which `new Date()` in a
+    browser parses as LOCAL time — silently shifting every rendered timestamp by
+    the viewer's UTC offset. That is how the admin dashboard reported an 8-hour-old
+    sync that was two hours old, from IST (2026-07-30).
+
+    A naive value reaching here is UTC by construction, so stamping UTC on it is a
+    statement of what it already is, not a conversion.
+    """
+    if dt is None:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).isoformat()
+
 # Stage A ships no paywall: every brief returns in full with `locked_sections: []`
 # (layer5 §6). The GATING MECHANISM is built and proven fail-closed
 # (`graph.sections.gate_sections` + tests/test_sections.py) so the Stage B flip is
@@ -270,10 +288,10 @@ def health(deps: Deps) -> dict:
         ng = next_gameweek(session)
         last = session.scalar(select(func.max(EpScore.computed_at)))
     return {
-        "last_sync": last.isoformat() if last else None,
+        "last_sync": iso_utc(last),
         "mode": mode,
         "next_gw": ng.id if ng else None,
-        "next_deadline": ng.deadline.isoformat() if ng else None,
+        "next_deadline": iso_utc(ng.deadline) if ng else None,
     }
 
 
@@ -295,14 +313,63 @@ def signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> N
                                   tier="free", source=source))
 
 
-def upsert_note(deps: Deps, team_id: int, note: str) -> None:
+# --- curated-table writes --------------------------------------------------
+#
+# SKIP-IF-IDENTICAL IS LOAD-BEARING, NOT AN OPTIMISATION.
+#
+# `max(team_notes.updated_at)` and `max(european_weeks.updated_at)` ARE the
+# `curated_notes_version` / `euro_weeks_version` halves of the brief cache key
+# (graph/data.py, docs/CLAUDE.md "Configuration"). The admin UI re-sends whatever
+# is in the textarea — including on a save where nothing was typed — so writing
+# unconditionally would bump the version and invalidate EVERY cached brief on a
+# no-op click. Compare first; write only on a real change.
+#
+# Both return whether they wrote, so the UI can say so and the tests can assert it.
+
+def upsert_note(deps: Deps, team_id: int, note: str) -> bool:
     with deps.session_factory() as session, session.begin():
+        row = session.get(TeamNote, team_id)
+        if row is not None and row.note == note:
+            return False
         session.merge(TeamNote(team_id=team_id, note=note, is_sample=False))
+        return True
 
 
 def upsert_euro_week(deps: Deps, team_id: int, gameweek: int,
-                     competition: str, tie_importance: int) -> None:
+                     competition: str, tie_importance: int) -> bool:
     with deps.session_factory() as session, session.begin():
+        row = session.get(EuropeanWeek, (team_id, gameweek))
+        if (row is not None and row.competition == competition
+                and row.tie_importance == tie_importance):
+            return False
         session.merge(EuropeanWeek(
             team_id=team_id, gameweek=gameweek,
             competition=competition, tie_importance=tie_importance))
+        return True
+
+
+def replace_euro_weeks(deps: Deps, rows: list[dict]) -> int:
+    """Whole-table save from the admin editor. Returns the number of rows changed.
+
+    The editor edits a grid, so add / edit / remove all arrive as one submission:
+    upsert everything sent, delete everything absent. Per-row skip-if-identical for
+    the reason above — this endpoint is the one most likely to be handed a table
+    that has not actually changed.
+    """
+    keep = {(r["team_id"], r["gameweek"]) for r in rows}
+    changed = 0
+    with deps.session_factory() as session, session.begin():
+        existing = {(r.team_id, r.gameweek): r
+                    for r in session.scalars(select(EuropeanWeek))}
+        for key, row in existing.items():
+            if key not in keep:
+                session.delete(row)
+                changed += 1
+        for r in rows:
+            cur = existing.get((r["team_id"], r["gameweek"]))
+            if (cur is not None and cur.competition == r["competition"]
+                    and cur.tie_importance == r["tie_importance"]):
+                continue
+            session.merge(EuropeanWeek(**r))
+            changed += 1
+    return changed

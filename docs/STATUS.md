@@ -434,16 +434,82 @@ back, un-ignore and commit the driver.
 
 | Input | Where it lives | How it's fed |
 |---|---|---|
-| **`team_notes`** | `team_notes` table (`fpl/models.py:242`) | `POST /api/admin/notes` — Bearer `ADMIN_TOKEN`. `{team_id, note}`. No UI. |
-| **`european_weeks`** | `european_weeks` table (`fpl/models.py:259`) | `POST /api/admin/euro-weeks` — Bearer `ADMIN_TOKEN`. `{team_id, gameweek, competition, tie_importance}`. Drives the v1.4 rotation dampener. Empty = no-op. |
+| **`team_notes`** | `team_notes` table (`fpl/models.py:242`) | **`/admin` → Team notes** (below), or `POST /api/admin/notes` — Bearer `ADMIN_TOKEN`, `{team_id, note}`. |
+| **`european_weeks`** | `european_weeks` table (`fpl/models.py:259`) | **`/admin` → European weeks** (below), or `POST /api/admin/euro-weeks`. Drives the v1.4 rotation dampener. Empty = no-op. |
 | **Engine calibration** | `engine/config.py`, `config_version = "v1.4"` | Every weight/table is versioned; bumping `config_version` stamps into every components blob. **Never inline a magic number.** |
 | **Graph tunables** | `graph/config.py` | Incl. the placeholder version constants — changing them invalidates the whole brief cache once. |
 | **Writer tunables** | `writer/config.py` | Length gates (250–700 words), `MAX_RETRIES=1`, `REQUIRED_HEADERS`, model default, `SEND_TEMPERATURE` gate. |
 | **Prompt** | `writer/prompts/system_v0.1.md` | Still v0.1. Iteration to v≥0.2 is the flagged human-in-the-loop work. |
 | **`players_archive`** | `players_archive` table (`fpl/models.py:96`) | Normally written ONCE per season by the rollover routine inside `sync_fpl()`. When that is missed, `python -m fpl backfill-archive` is the recovery — see below. |
 
-Both admin endpoints are curl-only — there is no admin UI and none is planned (§ "explicitly
-LATER").
+#### The `/admin` console (added 2026-07-30)
+
+Both curated tables used to be curl-only. They now have a UI at **`/admin`** inside the same
+Next.js app, built to make the Sunday pass a fifteen-minute click-through rather than a
+sequence of hand-written `curl` bodies. The curl endpoints still work unchanged.
+
+**Auth.** One prompt for `ADMIN_TOKEN`, verified against `GET /api/admin/overview` before it
+is stored, kept in `localStorage`, sent as `Bearer` on every admin call. A 401 from anywhere
+clears the token and re-prompts (`lib/admin.ts` dispatches `admin-unauthorized`;
+`AdminShell` listens). A token that is merely *unreachable* — API down, `FRONTEND_ORIGIN`
+mismatch — reports that instead of blaming the token. This is the existing operator token,
+not user auth: **no accounts, no sessions, no login page** (docs/CLAUDE.md still holds).
+
+**Not linked, not indexed.** Nothing on any public page links to `/admin`; the layout sets
+`robots: noindex, nofollow, nocache`. `tests/test_api.py::test_admin_is_never_linked_from_a_public_page`
+greps every public `app/**` and `components/*` file and fails if a link appears.
+
+**Pages.**
+
+| Page | What it's for |
+|---|---|
+| `/admin` | Post-sync sanity check: mode, sync freshness, row counts, archive-by-season, `match_method` spread, top 20 by `ep_next4`, and every player carrying an honesty flag. Zeroes, an empty archive and a `match_method` that has collapsed onto `none` render red — the missed-rollover signature (above) is meant to be visible without reading carefully. |
+| `/admin/notes` | Twenty cards, one per club. Empty notes show a manager / penalties / set-pieces / rotation / shape / watch skeleton as **placeholder** text — never pre-filled content, since a note that exists but was never written would be handed to the writer as fact. Per-card Save with an unsaved-changes indicator. |
+| `/admin/euro-weeks` | Editable grid (club, GW, competition, importance) with add/remove, saved in one submission via `POST /api/admin/euro-weeks/replace` — upsert what's sent, delete what isn't. |
+| `/admin/fixtures` | Club picker → next 6 with FDR colour-coding and the swing, computed by `graph.fixtures_util.swing_score` — the same function that raises a `fixture_cliff` problem, never a second implementation. |
+
+**Read endpoints** (all `GET`, all Bearer-gated, all in `api/admin.py`, which never writes):
+`/api/admin/overview`, `/notes`, `/euro-weeks`, `/players?q=&flagged=`,
+`/fixtures/{team_short}?n=`, `/top?n=`. `overview` also returns the 20-club list, so the
+picker and the grid don't need a second round trip.
+
+##### An unchanged save must not bump `updated_at` — the rule this UI is built around
+
+`max(team_notes.updated_at)` and `max(european_weeks.updated_at)` **are** the
+`curated_notes_version` / `euro_weeks_version` halves of the brief cache key. A form re-sends
+its contents on every click, including clicks where nothing was typed — so writing
+unconditionally would invalidate **every cached brief in the database** on a no-op save.
+
+`service.upsert_note`, `upsert_euro_week` and `replace_euro_weeks` therefore compare before
+writing and skip if identical, returning `changed` so the UI can say "No change" rather than
+claim a save that never happened. The UI additionally disables Save when nothing is dirty,
+but that is a convenience — the server-side skip is the control. Covered by
+`test_saving_an_unchanged_note_does_not_bump_updated_at`,
+`test_saving_a_changed_note_does_bump_updated_at` and
+`test_unchanged_euro_week_grid_does_not_bump`.
+
+##### Pointing it at production
+
+`/admin` is a client-side page against whatever `NEXT_PUBLIC_API_URL` names, so the same
+build administers a deployed API:
+
+```bash
+NEXT_PUBLIC_API_URL=https://<your-render-service>.onrender.com npm --prefix web run dev
+# then http://localhost:3000/admin, paste the PROD ADMIN_TOKEN
+```
+
+Two things must line up or the token prompt reports "API unreachable": `ADMIN_TOKEN` must be
+set on that API (empty = admin closed, never open), and `FRONTEND_ORIGIN` must match the
+origin you are browsing from — CORS is single-origin, and `localhost` and `127.0.0.1` are
+different origins.
+
+##### Timestamps carry an offset (fixed 2026-07-30)
+
+Found by driving the dashboard: it reported an 8-hour-old sync that was 2 hours old. SQLite
+returns naive datetimes, and a naive ISO string is parsed as **local** time by `new Date()`,
+shifting every rendered timestamp by the viewer's UTC offset. `service.iso_utc()` now stamps
+UTC at the serialization boundary for `/api/health` and every admin timestamp;
+`test_every_served_timestamp_carries_a_utc_offset` holds the line.
 
 #### Missed-rollover recovery — `backfill-archive` (added 2026-07-30)
 
