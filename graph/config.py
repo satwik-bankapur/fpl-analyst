@@ -24,13 +24,25 @@ DEAD_BENCH_EP_NEXT4 = 4.0       # bench player below this ep_next4 => dead_bench
 BLANK_EXPOSURE_STARTERS = 4     # >= this many starters blanking in next4 => blank_exposure
 INJURY_DOUBT_CHANCE = 75        # chance <= this on a doubt flag => injury_doubt problem
 
+# --- FPL squad rules -------------------------------------------------------
+# NOT tunables — these are the game's own rules, and every layer that enforces a
+# squad has to agree on them: MarketScout's replacement filter, the
+# POST /api/brief validator, and the frontend picker (mirrored ONCE, in
+# web/lib/api.ts). A literal 3 or 15 anywhere else is a future disagreement.
+#
+# The API validator is the one that matters: the picker's caps are a courtesy to
+# the user, not a control. A hand-rolled POST bypasses them entirely.
+MAX_PER_CLUB = 3
+SQUAD_SIZE = 15
+POSITION_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}   # GK / DEF / MID / FWD
+SQUAD_BUDGET = 100.0                        # £m
+
 # MarketScout (§2.2)
 REPLACEMENT_TOP_N = 3
 DIFFERENTIAL_TOP_N = 5
 DIFFERENTIAL_MAX_OWNERSHIP = 10.0
 TEMPLATE_MIN_OWNERSHIP = 30.0
 TEMPLATE_TOP_N = 5
-MAX_PER_CLUB = 3
 SALE_PRICE_EDGE = 0.3           # warn when a replacement is within £this of affordability
 
 # FixturePlanner (§2.3)

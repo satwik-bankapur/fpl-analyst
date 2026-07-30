@@ -105,8 +105,24 @@ def build_context(players, teams, fixtures, gameweeks, *, config=DEFAULT_CONFIG,
 
     if archive:
         ctx.archive_season = archive[0].get("season")
+        # An FPL element id is NOT stable across a season reset — the API
+        # reassigns ids club-by-club each July. Measured on the live 2026-27
+        # bootstrap against the archived 2025-26 season (2026-07-30): of 564
+        # id-to-id joins, exactly 5 landed on the same person. Indexing the
+        # archive by raw id therefore hands `_resolve_preseason` (and the
+        # `_resolve_current` early-season blend) a confident WRONG match for
+        # ~99% of players — Haaland's season attached to Mason Mount, and a
+        # top-20 that looked plausible and was nonsense.
+        #
+        # So the id path is now VERIFIED, not assumed: an id only indexes when it
+        # still points at the same name. A mismatch falls through to the
+        # (full_name, position) match and then to the baseline, both of which
+        # carry honesty flags. Fixed here, in the one index both resolvers read,
+        # rather than in each resolver.
+        current_name_by_id = {p["id"]: p.get("full_name") for p in players}
         for r in archive:
-            ctx.archive_by_id[r["id"]] = r
+            if current_name_by_id.get(r["id"]) == r.get("full_name"):
+                ctx.archive_by_id[r["id"]] = r
             ctx.archive_by_namepos.setdefault((r.get("full_name"), r["position"]), []).append(r)
         ctx.baseline = compute_baseline_table(archive, config)
         # Promoted teams: current teams with no archive players last season.

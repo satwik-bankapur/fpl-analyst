@@ -27,7 +27,7 @@ from sqlalchemy.pool import StaticPool
 from engine.scoring import score_all
 from fpl.errors import FPLApiError
 from fpl.models import Base, EpScore, EuropeanWeek, Fixture, Gameweek, Player, Team, TeamNote
-from fpl.models import EmailSignup
+from fpl.models import DraftSquad, EmailSignup
 from fpl.sync import sync_fpl
 from graph.deps import Deps
 
@@ -320,17 +320,37 @@ def _FX(fid, gw, home, away):
                 finished=False, home_score=None, away_score=None)
 
 
+# Day-one squad rules (2026-07-30): POST /api/brief now enforces the FPL squad
+# rules server-side, and MAX_PER_CLUB=3 means a legal 15 needs at least 5 clubs.
+# The fixture therefore spans 6 clubs instead of 2. DAY_ONE_SQUAD below is a
+# hand-checked legal 15 out of it — 2/5/5/3 across 6 clubs, £90.0m.
+_DAY_ONE_TEAMS = 6
+_DAY_ONE_PLAYERS = 22
+
+
+def _day_one_team(pid: int) -> int:
+    return ((pid - 1) % _DAY_ONE_TEAMS) + 1
+
+
+def _day_one_position(pid: int) -> int:
+    return (pid % 4) + 1
+
+
+DAY_ONE_SQUAD = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 17, 18]
+
+
 @pytest.fixture
 def zeroed_preseason():
     """Day-one DB: zeroed current players, populated archive, EP via score_all."""
-    teams = [_T(1, "AAA"), _T(2, "BBB")]
-    # 22 players split across 2 teams, spread over positions.
-    players = [_P(pid, team_id=1 if pid <= 11 else 2, position=((pid % 4) + 1))
-               for pid in range(1, 23)]
+    teams = [_T(tid, f"T{tid}") for tid in range(1, _DAY_ONE_TEAMS + 1)]
+    # 22 players spread round-robin over 6 clubs and all four positions.
+    players = [_P(pid, team_id=_day_one_team(pid), position=_day_one_position(pid))
+               for pid in range(1, _DAY_ONE_PLAYERS + 1)]
     archive = [_archive_row(p["id"], p["team_id"], p["position"]) for p in players]
     gameweeks = [_G(1, is_next=True), _G(2), _G(3), _G(4)]
-    # Each team plays every horizon GW -> no blanks.
-    fixtures = [_FX(g, g, 1, 2) for g in (1, 2, 3, 4)]
+    # Every team plays every horizon GW -> no blanks.
+    fixtures = [_FX(gw * 10 + h, gw, h, h + 1)
+                for gw in (1, 2, 3, 4) for h in (1, 3, 5)]
 
     results = score_all(players, teams, fixtures, gameweeks,
                         mode="PRESEASON", anchor=1, archive=archive)
@@ -373,10 +393,10 @@ def test_day_one_picker_and_draft_end_to_end(zeroed_preseason, client_for):
 
     # 1) Picker payload works day one (zeroed players still listed with price/pos).
     players = client.get("/api/players").json()
-    assert len(players) == 22 and all(p["price"] == 6.0 for p in players)
+    assert len(players) == _DAY_ONE_PLAYERS and all(p["price"] == 6.0 for p in players)
 
     # 2) Full draft -> brief on archive-backed EP, at the API level.
-    r = client.post("/api/brief", json=_draft_body(list(range(1, 16)), 1))
+    r = client.post("/api/brief", json=_draft_body(DAY_ONE_SQUAD, DAY_ONE_SQUAD[0]))
     assert r.status_code == 200, r.text
     body = r.json()
     assert {"verdict", "transfer", "captaincy"} <= set(body["sections"])
@@ -389,3 +409,164 @@ def test_preseason_team_id_routes_to_draft(zeroed_preseason, client_for):
     assert r.status_code == 409
     detail = r.json()["detail"]
     assert detail["error"] == "no_picks_yet" and detail["hint"] == "preseason_draft"
+
+
+# ===========================================================================
+# Squad-rule validation on POST /api/brief (2026-07-30)
+#
+# POST /api/brief is public and unauthenticated. The picker enforces the same
+# rules in the browser, which stops honest mistakes and nothing else — every
+# case below is a request the picker cannot produce but curl can. Each asserts
+# the SPECIFIC error code, because "400" alone would let two rules collapse
+# into one and go unnoticed.
+# ===========================================================================
+
+def _pool():
+    """(id, position, club, price) for every player in the frozen season."""
+    return [{"id": e["id"], "pos": e["element_type"], "team": e["team"],
+             "price": e["now_cost"] / 10}
+            for e in _load("bootstrap_2025-26.json")["elements"]]
+
+
+def _fill(quota, *, cheapest=True, cap=3, seed=()):
+    """Greedy squad build to `quota`, honouring a per-club `cap`, from `seed`."""
+    pool = sorted(_pool(), key=lambda p: p["price"], reverse=not cheapest)
+    chosen = list(seed)
+    taken = {p["id"] for p in chosen}
+    clubs: dict[int, int] = {}
+    counts: dict[int, int] = {}
+    for p in chosen:
+        clubs[p["team"]] = clubs.get(p["team"], 0) + 1
+        counts[p["pos"]] = counts.get(p["pos"], 0) + 1
+    for pos, need in quota.items():
+        for p in pool:
+            if counts.get(pos, 0) >= need:
+                break
+            if p["pos"] != pos or p["id"] in taken or clubs.get(p["team"], 0) >= cap:
+                continue
+            chosen.append(p)
+            taken.add(p["id"])
+            clubs[p["team"]] = clubs.get(p["team"], 0) + 1
+            counts[pos] = counts.get(pos, 0) + 1
+    return chosen
+
+
+QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
+
+
+def _ids(squad):
+    return [p["id"] for p in squad]
+
+
+def _reject(client, ids, captain, code):
+    r = client.post("/api/brief", json=_draft_body(ids, captain))
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["error"] == code, detail
+    assert detail["message"]           # a specific, human-readable reason
+    return detail
+
+
+def test_a_legal_squad_is_accepted(golden_sf, client_for):
+    """The acceptance baseline: the same builder the rejection cases mutate."""
+    squad = _fill(QUOTA)
+    ids = _ids(squad)
+    assert len(ids) == 15 and round(sum(p["price"] for p in squad), 1) <= 100.0
+
+    r = client_for(golden_sf).post("/api/brief", json=_draft_body(ids, ids[0]))
+    assert r.status_code == 200, r.text
+    assert r.json()["draft_id"]
+
+
+@pytest.mark.parametrize("n", [14, 16])
+def test_wrong_squad_size_rejected(golden_sf, client_for, n):
+    ids = _ids(_fill(QUOTA))
+    ids = ids[:n] if n < 15 else ids + [ids[0] + 500]
+    _reject(client_for(golden_sf), ids, ids[0], "squad_size")
+
+
+def test_duplicate_players_rejected(golden_sf, client_for):
+    ids = _ids(_fill(QUOTA))
+    ids[-1] = ids[0]                      # still 15 entries, only 14 players
+    _reject(client_for(golden_sf), ids, ids[0], "duplicate_players")
+
+
+def test_unknown_player_ids_rejected(golden_sf, client_for):
+    ids = _ids(_fill(QUOTA))
+    ids[-1] = 999_999
+    detail = _reject(client_for(golden_sf), ids, ids[0], "unknown_players")
+    assert "999999" in detail["message"]
+
+
+def test_wrong_position_counts_rejected(golden_sf, client_for):
+    # 3 GK / 5 DEF / 5 MID / 2 FWD — fifteen players, illegal shape.
+    ids = _ids(_fill({1: 3, 2: 5, 3: 5, 4: 2}))
+    assert len(ids) == 15
+    _reject(client_for(golden_sf), ids, ids[0], "position_counts")
+
+
+def test_over_budget_rejected(golden_sf, client_for):
+    squad = _fill(QUOTA, cheapest=False)     # the 15 most expensive legal picks
+    assert round(sum(p["price"] for p in squad), 1) > 100.0
+    ids = _ids(squad)
+    detail = _reject(client_for(golden_sf), ids, ids[0], "budget_exceeded")
+    assert "100.0" in detail["message"]
+
+
+def test_fourth_player_from_one_club_rejected(golden_sf, client_for):
+    """The club cap. MarketScout has always honoured it; the endpoint did not."""
+    pool = _pool()
+    club = pool[0]["team"]
+    # Four from one club, one per position, so ONLY the club rule is broken.
+    seed = [next(p for p in pool if p["team"] == club and p["pos"] == pos)
+            for pos in (1, 2, 3, 4)]
+    squad = _fill(QUOTA, seed=seed)
+    ids = _ids(squad)
+    assert len(ids) == 15
+    assert sum(1 for p in squad if p["team"] == club) == 4
+
+    detail = _reject(client_for(golden_sf), ids, ids[0], "club_over_cap")
+    assert "ARS" in detail["message"] and "(4)" in detail["message"]
+
+
+def test_captain_outside_the_squad_rejected(golden_sf, client_for):
+    ids = _ids(_fill(QUOTA))
+    outsider = next(p["id"] for p in _pool() if p["id"] not in ids)
+    _reject(client_for(golden_sf), ids, outsider, "captain_not_in_squad")
+
+
+def test_no_captain_is_still_allowed(golden_sf, client_for):
+    """captain_id is optional — the Strategist picks its own. Absent != invalid."""
+    ids = _ids(_fill(QUOTA))
+    r = client_for(golden_sf).post("/api/brief", json=_draft_body(ids, None))
+    assert r.status_code == 200, r.text
+
+
+def test_a_rejected_draft_is_not_persisted(golden_sf, client_for):
+    """An illegal squad must not leave a draft row (or a signup) behind."""
+    ids = _ids(_fill(QUOTA))[:14]
+    client = client_for(golden_sf)
+    r = client.post("/api/brief", json={"draft": {"player_ids": ids, "captain_id": ids[0]},
+                                        "email": "nope@example.com"})
+    assert r.status_code == 400
+    with golden_sf() as s:
+        assert s.scalar(select(func.count()).select_from(DraftSquad)) == 0
+        assert s.scalar(select(func.count()).select_from(EmailSignup)) == 0
+
+
+def test_the_club_cap_is_one_shared_constant():
+    """MarketScout, the API validator and the frontend must not disagree."""
+    import importlib
+    from pathlib import Path as _Path
+
+    from graph.config import MAX_PER_CLUB
+
+    # `graph.nodes.market_scout` the NAME is the node function (re-exported in
+    # graph/nodes/__init__.py), so reach the module itself.
+    ms = importlib.import_module("graph.nodes.market_scout")
+
+    assert MAX_PER_CLUB == 3                      # FPL's actual rule
+    assert ms.MAX_PER_CLUB is MAX_PER_CLUB        # imported, not redefined
+    mirror = (_Path(__file__).parents[1] / "web" / "lib" / "api.ts").read_text(
+        encoding="utf-8")
+    assert f"export const MAX_PER_CLUB = {MAX_PER_CLUB};" in mirror

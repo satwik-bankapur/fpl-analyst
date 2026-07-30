@@ -65,12 +65,10 @@ export default function BriefView({ brief }: { brief: Brief }) {
           <span>
             {keys.length} section{keys.length === 1 ? "" : "s"}
           </span>
-          {brief.cached && (
-            <>
-              <span aria-hidden>·</span>
-              <span>From cache</span>
-            </>
-          )}
+          {/* `brief.cached` is deliberately NOT shown (2026-07-30). Whether the
+              brief came from the cache is our operational detail, not the
+              reader's business — it told them nothing and read like debug output.
+              The flag stays on the API response for logs and DEBUG. */}
         </div>
       </header>
 

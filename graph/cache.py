@@ -1,7 +1,7 @@
 """Entry point + cache integration (§4).
 
 input_hash = hash(sorted picks + captain + bank + ep config_version +
-gameweek_anchor + curated_notes_version + euro_weeks_version).
+gameweek_anchor + curated_notes_version + euro_weeks_version + writer_version).
 
 The curated-notes and euro-weeks versions are REAL sources as of 2026-07-10:
 max(updated_at) over `team_notes` / `european_weeks`, resolved from the DB in
@@ -47,6 +47,13 @@ def compute_input_hash(squad, gameweek_anchor: int, ep_cfg_version: str,
         "gameweek_anchor": gameweek_anchor,
         "curated_notes_version": notes_version,
         "euro_weeks_version": euro_version,
+        # The writer's own version, added 2026-07-30. Without it a template change
+        # is invisible to the cache and every previously-generated brief keeps
+        # serving the OLD prose forever — the humanised phrasing and the computed
+        # draft XI would both have shipped unseen for anyone who had already
+        # generated a brief. Bumping STUB_MODEL invalidates exactly once, the same
+        # deliberate mass-miss the curated-version tags above cause.
+        "writer_version": STUB_MODEL,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()

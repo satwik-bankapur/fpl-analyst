@@ -165,6 +165,118 @@ def test_real_stub_output_splits_to_canonical_keys(golden):
                 assert line.strip() not in blob
 
 
+def test_stub_output_leaks_no_internals(golden):
+    """The stub IS the product until the LLM writer is wired in (2026-07-30).
+
+    It used to print the upstream contracts raw — problem-type slugs, severity
+    numbers, reasoning codes, engine flags, column names, player ids. Those are
+    ours, not the reader's. Every token below appeared in a real brief served on
+    localhost; none may appear again.
+    """
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+    md = final.brief_md
+
+    banned = [
+        # problem-type slugs (graph/state.py PROBLEM_TYPES)
+        "dead_bench_spot", "injury_doubt", "fixture_cliff", "cold_form",
+        "blank_exposure", "unavailable:",
+        # severity / reasoning-code / flag scaffolding
+        "sev1", "sev2", "sev3", "codes:", "delta:", "problem:", "severity:",
+        "flag:", "no_qualifying_delta", "transfer:roll", "captain_ep:",
+        "swing_team:", "double_gw_players:", "no_history_fallback",
+        "promoted_team_fallback", "thin_minutes_sample", "early_season_blend",
+        # raw field / column names
+        "ep_next4", "minutes_prob", "chance_of_playing", "ownership_pct",
+        "data_basis", "match_method", "config_version", "pid:", "swing:",
+        # the action enum and the stub's old shouty verbs
+        "MAKE:", "ROLL:",
+    ]
+    hits = [tok for tok in banned if tok in md]
+    assert not hits, f"stub leaked internals: {hits}\n---\n{md}"
+
+    # ...and no bare `key:value` debug pair survived in a bullet.
+    for line in md.splitlines():
+        body = line.lstrip("- ").strip()
+        if body.startswith(("#", ">", "_")):
+            continue
+        assert "·  sev" not in body
+
+
+@pytest.mark.parametrize("kind,evidence,expected", [
+    ("unavailable", ["status:i", "Ankle injury - expected back 15 Sep",
+                     "unavailable:i"],
+     "Saka is not available to play — Ankle injury - expected back 15 Sep."),
+    ("injury_doubt", ["chance_of_playing:50%", "Knock", "injury_doubt:50%"],
+     "Saka is doubtful, rated 50% likely to play — Knock."),
+    ("fixture_cliff", ["swing:-1.2", "team:ARS"],
+     "Saka's fixtures get harder from here (ARS face a difficult run)."),
+    ("cold_form", ["form:1.2", "ppg:5.0", "minutes_prob:0.95"],
+     "Saka is scoring below his own season average right now "
+     "(1.2 recently against 5.0 per game)."),
+    ("dead_bench_spot", ["ep_next4:0.48"],
+     "Saka is projected to return only 0.5 points over the next four "
+     "gameweeks, so he adds little from the bench."),
+])
+def test_every_problem_type_has_a_plain_english_sentence(kind, evidence, expected):
+    """The golden squad only ever raises cold_form and dead_bench_spot, so the
+    other problem types are covered here directly — otherwise a raw
+    `[fixture_cliff · sev2]` could come back unnoticed."""
+    from graph.nodes.writer import _problem_sentence
+
+    assert _problem_sentence(kind, "Saka", evidence) == expected
+
+
+def test_blank_exposure_counts_players_not_ids():
+    from graph.nodes.writer import _problem_sentence
+
+    sentence = _problem_sentence(
+        "blank_exposure", "your squad",
+        ["4 starters blank in the next-4 horizon", "pid:1", "pid:2", "pid:3", "pid:4"])
+    assert sentence == ("4 of your starters have a gameweek with no fixture in "
+                       "the next four.")
+    assert "pid" not in sentence
+
+
+def test_reasoning_codes_become_notes_or_are_dropped():
+    from graph.nodes.writer import _code_notes, _delta
+
+    codes = ["delta:+2.45", "problem:unavailable", "severity:3",
+             "flag:no_history_fallback", "flag:thin_minutes_sample",
+             "flag:blank_gw:41"]
+    notes = _code_notes(codes)
+
+    assert len(notes) == 2, notes                     # the two explainable flags
+    assert all("_" not in n and ":" not in n for n in notes)
+    # problem/severity/delta are scaffolding or said elsewhere — never echoed.
+    assert not any("unavailable" in n or "3" in n for n in notes)
+    assert _delta(codes) == 2.45
+
+
+def test_stub_captaincy_never_prints_a_raw_player_id(golden):
+    """The differential note used to render as "vice (413) is within...".
+
+    Guarded here rather than in the strategist because the note is a predicate
+    now: whoever renders it owns the name (layer3 §2.4 drift note, 2026-07-30).
+    """
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+
+    note = final.decisions.captain.differential_note
+    if note:
+        assert str(final.decisions.captain.vice_id) not in note
+        assert "ep" not in note.split()
+    captaincy = split_sections(final.brief_md)["captaincy"]
+    # Every squad id, and the fallback "#id" spelling load_players uses.
+    for pk in final.squad.picks:
+        assert f"#{pk.player_id}" not in captaincy
+        assert f"({pk.player_id})" not in captaincy
+
+
 def test_chips_section_appears_only_when_stance_is_not_hold(golden):
     """`chips` is spec'd as conditional (layer4 §3). Rendering it on a plain hold
     would put an empty paid section on the lock card."""
@@ -253,6 +365,167 @@ def _draft(SF, ids, captain):
 def _preseason_state(did):
     return BriefState(request=RequestCtx(
         mode="PRESEASON", draft_id=did, gameweek_anchor=0, requested_at=_now()))
+
+
+# ===========================================================================
+# Draft XI selection (layer3 §2.1 drift note, 2026-07-30)
+#
+# A draft squad is fifteen names in submission order. Slots used to BE that
+# order, so the pipeline analysed an arbitrary eleven and the brief reported its
+# projection as if it were the reader's lineup — which is how a demo brief came
+# to bench Haaland. These fix the rule, not the symptom.
+# ===========================================================================
+
+def _fifteen(teams=4):
+    """A legal 2/5/5/3 fifteen spread over enough clubs, ids grouped by position.
+
+    GK 1-2 · DEF 11-15 · MID 21-25 · FWD 31-33.
+    """
+    spec = [(1, 2, 1), (11, 5, 2), (21, 5, 3), (31, 3, 4)]
+    players, ids = [], []
+    for start, count, pos in spec:
+        for n in range(count):
+            pid = start + n
+            players.append(_P(pid, (pid % teams) + 1, position=pos))
+            ids.append(pid)
+    return players, ids
+
+
+def _xi_of(final):
+    return [pk.player_id for pk in final.squad.picks if pk.slot <= 11]
+
+
+def _bench_of(final):
+    return [pk.player_id for pk in sorted(final.squad.picks, key=lambda pk: pk.slot)
+            if pk.slot >= 12]
+
+
+def _run_draft(players, ep_rows, ids, captain):
+    teams = [_T(t, f"T{t}") for t in range(1, 5)]
+    engine, SF = _build_db(teams, players, ep_rows)
+    try:
+        did = _draft(SF, ids, captain)
+        deps = Deps(session_factory=SF, client=None)
+        return run_brief(_preseason_state(did), deps)
+    finally:
+        engine.dispose()
+
+
+def test_the_highest_ep_player_starts_even_when_submitted_last():
+    """The Haaland case: naive slot order benched the best player in the squad."""
+    players, ids = _fifteen()
+    star = 33                                   # a FWD, submitted last of fifteen
+    ep_rows = [_EP(pid, ep=3.0, ep4=12.0) for pid in ids if pid != star]
+    ep_rows.append(_EP(star, ep=9.9, ep4=40.0))
+    # Submission order alone would put him at slot 15 — benched.
+    assert ids.index(star) + 1 == 15
+
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+    xi = _xi_of(final)
+
+    assert star in xi, "the highest-EP player in the squad must start"
+    assert star not in _bench_of(final)
+
+
+def test_formation_constraints_hold_on_a_skewed_squad():
+    """Five strong defenders cannot all start alongside a legal rest of the XI."""
+    players, ids = _fifteen()
+    defs = [11, 12, 13, 14, 15]
+    ep_rows = []
+    for pid in ids:
+        # Every DEF outscores every non-DEF, so an unconstrained optimiser would
+        # start all five and then some.
+        ep_rows.append(_EP(pid, ep=9.0 if pid in defs else 2.0, ep4=30.0))
+    final = _run_draft(players, ep_rows, ids, captain=defs[0])
+
+    xi = _xi_of(final)
+    pos = {p["id"]: p["position"] for p in players}
+    counts = {}
+    for pid in xi:
+        counts[pos[pid]] = counts.get(pos[pid], 0) + 1
+
+    assert len(xi) == 11
+    assert counts.get(1, 0) == 1, "exactly one goalkeeper starts"
+    assert counts.get(2, 0) == 5, "all five defenders start — that is the maximum"
+    assert 2 <= counts.get(3, 0) <= 5
+    assert 1 <= counts.get(4, 0) <= 3
+    # ...and the bench keeper sits in the first bench slot, per FPL's sub rules.
+    bench = _bench_of(final)
+    assert pos[bench[0]] == 1
+
+
+def test_a_captain_outside_the_optimal_xi_is_never_benched():
+    """The user's captain is the one pick they actually made. Keep them starting."""
+    players, ids = _fifteen()
+    dud = 25                                    # a MID nobody would start
+    ep_rows = [_EP(pid, ep=8.0, ep4=30.0) for pid in ids if pid != dud]
+    ep_rows.append(_EP(dud, ep=0.1, ep4=0.4))
+
+    # Sanity: uncaptained, he does not make the cut.
+    uncaptained = _xi_of(_run_draft(players, ep_rows, ids, captain=ids[0]))
+    assert dud not in uncaptained
+
+    final = _run_draft(players, ep_rows, ids, captain=dud)
+    xi = _xi_of(final)
+    pos = {p["id"]: p["position"] for p in players}
+    counts = {}
+    for pid in xi:
+        counts[pos[pid]] = counts.get(pos[pid], 0) + 1
+
+    assert dud in xi, "the captain must never be silently benched"
+    assert len(xi) == 11
+    assert counts.get(1, 0) == 1 and 3 <= counts.get(2, 0) <= 5
+    assert 2 <= counts.get(3, 0) <= 5 and 1 <= counts.get(4, 0) <= 3
+    assert next(pk for pk in final.squad.picks if pk.player_id == dud).is_captain
+
+
+def test_the_brief_says_the_xi_was_chosen():
+    """The projection is meaningless if the reader thinks it is their own lineup."""
+    players, ids = _fifteen()
+    ep_rows = [_EP(pid, ep=5.0, ep4=20.0) for pid in ids]
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+
+    assert "Best XI picked from your 15" in final.brief_md
+    verdict = split_sections(final.brief_md)["verdict"]
+    assert "Best XI picked from your 15" in verdict
+
+
+def test_an_illegal_fifteen_falls_back_to_submission_order():
+    """Draft rows predating server-side validation can be unfieldable.
+
+    Inventing a lineup for them would be worse than leaving the order alone —
+    and it must not crash the pipeline either way.
+    """
+    teams = [_T(t, f"T{t}") for t in range(1, 5)]
+    # No forwards and only two defenders: no legal formation exists.
+    players = ([_P(1, 1, position=1), _P(2, 2, position=1)]
+               + [_P(10 + n, (n % 4) + 1, position=2) for n in range(2)]
+               + [_P(20 + n, (n % 4) + 1, position=3) for n in range(11)])
+    ids = [p["id"] for p in players]
+    ep_rows = [_EP(pid, ep=5.0, ep4=20.0) for pid in ids]
+
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+
+    assert final.error is None
+    assert [pk.player_id for pk in sorted(final.squad.picks, key=lambda pk: pk.slot)] == ids
+
+
+def test_submission_order_no_longer_changes_the_brief():
+    """Two managers who pick the same fifteen get the same analysis.
+
+    Before the XI was computed, shuffling the same squad produced a different
+    eleven — and the cache hashes ids, not order, so the two briefs also collided.
+    """
+    players, ids = _fifteen()
+    ep_rows = [_EP(pid, ep=float(pid % 7) + 1.0, ep4=float(pid % 5) + 10.0)
+               for pid in ids]
+
+    first = _run_draft(players, ep_rows, ids, captain=ids[0])
+    shuffled = list(reversed(ids))
+    second = _run_draft(players, ep_rows, shuffled, captain=ids[0])
+
+    assert _xi_of(first) == _xi_of(second)
+    assert first.brief_md == second.brief_md
 
 
 # ===========================================================================

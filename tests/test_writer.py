@@ -17,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 from fpl.models import Base, Brief, DraftSquad, EpScore, Fixture, Gameweek, Player, Team
 from graph import BriefState, run_brief
 from graph.deps import Deps
+from graph.nodes.writer import STUB_MODEL
 from graph.state import RequestCtx
 from writer.llm import generate_brief
 from writer.serializer import estimate_tokens, serialize_payload
@@ -167,7 +168,10 @@ def test_writer_bad_output_retries_then_stub_fallback(brief_env):
     res = generate_brief(state, deps, llm=llm, persist=True, input_hash="hash-xyz")
     assert llm.calls == 2                                            # one retry, then give up
     assert res.fell_back and not res.validated
-    assert res.model_label.startswith("stub-template-v1::fallback")
+    # Derived, not a pinned literal: the assertion is about the ::fallback label,
+    # and STUB_MODEL is bumped deliberately whenever the template's output changes
+    # (it feeds the brief cache key — see graph/cache.py).
+    assert res.model_label.startswith(f"{STUB_MODEL}::fallback")
     assert res.brief_md.startswith("# FPL Brief")                    # the Layer 3 stub output
     with SF() as s:  # fallback still persisted (with stub label, 0 tokens)
         assert s.scalar(select(func.count()).select_from(Brief)) == 1

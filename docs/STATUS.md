@@ -440,9 +440,34 @@ back, un-ignore and commit the driver.
 | **Graph tunables** | `graph/config.py` | Incl. the placeholder version constants — changing them invalidates the whole brief cache once. |
 | **Writer tunables** | `writer/config.py` | Length gates (250–700 words), `MAX_RETRIES=1`, `REQUIRED_HEADERS`, model default, `SEND_TEMPERATURE` gate. |
 | **Prompt** | `writer/prompts/system_v0.1.md` | Still v0.1. Iteration to v≥0.2 is the flagged human-in-the-loop work. |
+| **`players_archive`** | `players_archive` table (`fpl/models.py:96`) | Normally written ONCE per season by the rollover routine inside `sync_fpl()`. When that is missed, `python -m fpl backfill-archive` is the recovery — see below. |
 
 Both admin endpoints are curl-only — there is no admin UI and none is planned (§ "explicitly
 LATER").
+
+#### Missed-rollover recovery — `backfill-archive` (added 2026-07-30)
+
+`players_archive` is the only input pre-season analysis has, and it is written exactly once
+per season by a rollover the sync has to *witness* (layer1 §6.2). If no sync runs between
+the last finished gameweek and the API's season reset, the rollover is never detected and
+the archive stays empty — which is what happened on the local DB before 2026-07-30.
+
+It does not look like a bug. Every `ep` collapses onto the (position, price-band) baseline,
+so projections are all near-identical, and the only surviving differentiator is clean-sheet
++ save points — goalkeepers top the table and the recommended captain is a keeper.
+
+```bash
+# 1. rebuild the archive from any saved end-of-season bootstrap payload
+python -m fpl backfill-archive --season 2025-26 --from tests/assets/bootstrap_2025-26.json
+# 2. recompute ep_scores through the (now populated) archive path
+python -m fpl sync
+```
+
+Idempotent: the season's rows are deleted and rewritten in one transaction. Refuses to
+overwrite an existing season's rows without `--force`. Offline and deterministic — it does
+not sync for you, deliberately, so a failure in either half is unambiguous.
+`fpl/backfill.py`, covered by `tests/test_backfill.py` (whose load-bearing assertion is
+that the post-backfill top-20 by `ep_next4` genuinely spreads).
 
 ### The three things to do first
 

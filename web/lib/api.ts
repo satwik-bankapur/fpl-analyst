@@ -85,6 +85,15 @@ export function postSignup(email: string, teamId?: number | null, source = "land
   }).then(json<{ ok: boolean }>);
 }
 
+// MIRROR OF graph/config.py's FPL squad rules — that module is the source of
+// truth and POST /api/brief re-checks every one of these server-side. These
+// exist so the picker can PREVENT an illegal squad; they do not enforce it.
+// Mirrored ONCE, here — never re-typed as a literal in a component.
+export const MAX_PER_CLUB = 3;
+export const SQUAD_SIZE = 15;
+export const SQUAD_BUDGET = 100.0;
+export const POSITION_QUOTA: Record<string, number> = { GK: 2, DEF: 5, MID: 5, FWD: 3 };
+
 // MIRROR OF graph/sections.py — keep the two in sync, that module is the source
 // of truth. The KEYS and their ORDER are the API contract; the backend splitter
 // maps every writer's headers onto exactly these keys.

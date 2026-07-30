@@ -29,7 +29,12 @@ complete; Stage B (payments) is not started.
 The gap between what this repo *looks* like it does and what it does:
 
 - **Every brief a user receives comes from the deterministic template stub**
-  (`graph/nodes/writer.py`), not an LLM. It reads robotic because it is.
+  (`graph/nodes/writer.py`), not an LLM. It reads flat and factual because it is a
+  template — but as of 2026-07-30 it no longer leaks internals. Problem types and
+  reasoning codes map through `_problem_sentence()` / `_CODE_NOTES` to plain-English clauses,
+  and `tests/test_graph.py::test_stub_output_leaks_no_internals` holds the ban list
+  (type slugs, severities, codes, engine flags, column names, player ids). Add a new
+  problem type or reasoning code → add its sentence there, or it renders as nothing.
 - **`writer/llm.py` is wired to nothing.** `api/service.py` imports exactly one symbol
   from `writer/` (`render_generic_stub`). The LLM writer, its prompt, and its
   retry/validate/fallback ladder are complete and unit-tested, but no route calls them.
