@@ -96,11 +96,17 @@ Output `Decisions`:
 - `watchlist`: 3 entries drawn from differentials ∪ entering_good_run teams' top ep players.
 - `reasoning_codes`: machine-readable evidence pointers (e.g. `"delta:+5.8"`, `"flag:injury_doubt:75"`, `"swing:+1.2"`, `"pen_taker"` if in curated notes) — the Writer expands these into prose; they are the audit trail from decision back to data.
 
+**DRIFT NOTE 2026-07-30 — `differential_note` no longer carries ids.** This section said "attach differential_note with both ids". It did, and the stub Writer printed the note verbatim, so readers got `vice (413) is within 0.3 ep of the captain`. `pick_id` and `vice_id` are already fields on the same object, so the ids in the note were pure duplication with a leak attached. The note is now a **predicate about the vice** with no id and no `ep` — "is within 0.3 projected points of the captain and only 8.5% owned — a real differential" — and whoever renders it supplies the name. Guarded by `tests/test_graph.py::test_stub_captaincy_never_prints_a_raw_player_id`.
+
+**Reasoning codes are an AUDIT TRAIL, not copy.** Same date: a code with no plain-English mapping is now *dropped* by the stub Writer rather than printed. An unexplained `flag:no_history_fallback` in a reader's brief is worse than silence. The mapping lives in one place — `_CODE_NOTES` in `graph/nodes/writer.py`.
+
 **LLM insertion contract**: a future LLM Strategist receives exactly `(diagnosis, market, fixture_outlook)` serialized, and must return a valid `Decisions` object (structured output, schema-validated, one retry on validation failure, fall back to rules implementation on second failure). The swap is an implementation change behind an identical contract — enforced by a shared contract test suite that runs against BOTH implementations.
 
 ### 2.5 Writer (LLM — full spec is Layer 4; stubbed in this layer)
 
 v1-during-development stub: a deterministic template renderer that interpolates `Decisions` + evidence into the brief skeleton (Verdict / Transfer / Captaincy / Bench / Watchlist sections). Ugly output, correct structure. This makes the whole graph runnable, testable, and demoable before any prompt work, and remains permanently useful as the LLM-outage fallback.
+
+**DRIFT NOTE 2026-07-30 — "ugly output" was a development-only licence, and it expired.** `writer/llm.py` is wired to nothing, so this stub is what every real user reads. It was printing the upstream contracts raw: `[dead_bench_spot · sev1] Zubimendi: ep_next4:0.48`, `codes: delta:+2.45, problem:unavailable, severity:3, flag:no_history_fallback`. Every problem type and every surfaced reasoning code now maps to one short plain-English clause through `_problem_sentence()` / `_CODE_NOTES` in `graph/nodes/writer.py`. **No internal may appear in the output** — no type slug, no severity number, no code, no engine flag, no column name, no player id; `tests/test_graph.py::test_stub_output_leaks_no_internals` holds the ban list. The prose stays deliberately flat: the goal is not to imitate the LLM voice, only to stop reading like a debug log. The honesty footer is unchanged on purpose.
 
 ## 3. Error policy
 

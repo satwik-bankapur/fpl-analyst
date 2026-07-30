@@ -2,15 +2,26 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getPlayers, postDraftBrief, PlayerRow } from "@/lib/api";
+import {
+  getPlayers,
+  postDraftBrief,
+  PlayerRow,
+  MAX_PER_CLUB,
+  POSITION_QUOTA,
+  SQUAD_BUDGET,
+  SQUAD_SIZE,
+} from "@/lib/api";
 import LoadingState from "@/components/LoadingState";
 import ErrorState from "@/components/ErrorState";
 
 // Picker rules are the contract and are unchanged by the re-skin: 15 players,
-// caps 2/5/5/3, £100.0m budget, one captain, optional email, POST /api/brief.
-const BUDGET = 100.0;
+// caps 2/5/5/3, £100.0m budget, max 3 per club, one captain, optional email,
+// POST /api/brief. Every one of those numbers comes from lib/api's mirror of
+// graph/config.py — none is re-typed here — and the API re-checks all of them,
+// so this UI only has to stop the user before they hit a 400.
+const BUDGET = SQUAD_BUDGET;
 const POS_ORDER: PlayerRow["position"][] = ["GK", "DEF", "MID", "FWD"];
-const POS_CAP: Record<string, number> = { GK: 2, DEF: 5, MID: 5, FWD: 3 };
+const POS_CAP = POSITION_QUOTA;
 const POS_GROUP: Record<string, string> = { GK: "Goalkeepers", DEF: "Defenders", MID: "Midfielders", FWD: "Forwards" };
 // ponytail: fixed per-position row cap keeps the DOM small; swap for
 // virtualisation only if the list ever needs to show every player at once.
@@ -45,6 +56,14 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
   const spent = chosen.reduce((s, p) => s + p.price, 0);
   const remaining = BUDGET - spent;
   const posCount = (pos: string) => chosen.filter((p) => p.position === pos).length;
+  const clubCount = (club: string) => chosen.filter((p) => p.team_short === club).length;
+  // Clubs in use, heaviest first — the per-club counter in the rail.
+  const clubTally = Object.entries(
+    chosen.reduce<Record<string, number>>((acc, p) => {
+      acc[p.team_short] = (acc[p.team_short] || 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -56,10 +75,18 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
   // entirely with goalkeepers and defenders and leave forwards unreachable
   // without a search. Picked players are always kept in view so they can be
   // captained or removed even when they fall outside the cap or the search.
+  //
+  // Sorted by PRICE DESCENDING (2026-07-30). /api/players returns rows in
+  // element-id order, and FPL assigns ids club-by-club alphabetically — so the
+  // old order was effectively "Arsenal first", and the per-group row cap then cut
+  // the list off somewhere in the middle of the alphabet. Every recognisable
+  // player was below the fold. Price desc is also the FPL-familiar default.
   const groups = useMemo(() => {
     const pickedIds = new Set(Object.keys(picked).map(Number));
     return POS_ORDER.map((pos) => {
-      const inPos = filtered.filter((p) => p.position === pos);
+      const inPos = filtered
+        .filter((p) => p.position === pos)
+        .sort((a, b) => b.price - a.price || a.web_name.localeCompare(b.web_name));
       const rows = inPos.slice(0, ROWS_PER_POS);
       const shown = new Set(rows.map((p) => p.id));
       const pinned = players.filter((p) => p.position === pos && pickedIds.has(p.id) && !shown.has(p.id));
@@ -76,18 +103,19 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
         if (captainId === p.id) setCaptainId(null);
         return next;
       }
-      if (Object.keys(next).length >= 15) return cur;
+      if (Object.keys(next).length >= SQUAD_SIZE) return cur;
       if (posCount(p.position) >= POS_CAP[p.position]) return cur;
+      if (clubCount(p.team_short) >= MAX_PER_CLUB) return cur;
       next[p.id] = p;
       return next;
     });
   }
 
-  const complete = chosen.length === 15 && remaining >= 0;
+  const complete = chosen.length === SQUAD_SIZE && remaining >= 0;
 
   async function submit() {
     if (!complete) {
-      setError("Pick 15 players within £100.0m.");
+      setError(`Pick ${SQUAD_SIZE} players within £${BUDGET.toFixed(1)}m.`);
       return;
     }
     setError(null);
@@ -99,6 +127,13 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
       router.push(`/brief/draft/${brief.draft_id}`);
     } catch (e: any) {
       setBusy(false);
+      // A 400 is the server's squad-rule validator. The picker prevents all of
+      // these, so reaching one means the two disagree — say what the server said
+      // rather than blaming the writer for a rejection that never got that far.
+      if (e?.status === 400) {
+        setError(e?.detail?.message || "That squad isn't legal.");
+        return;
+      }
       setFailed(
         e?.status === 429
           ? "You've generated a few briefs already. The limit resets shortly — your squad is still here."
@@ -213,8 +248,10 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                     {rows.map((p) => {
                       const isPicked = !!picked[p.id];
                       const capReached = posCount(p.position) >= POS_CAP[p.position];
+                      const clubFull = !isPicked && clubCount(p.team_short) >= MAX_PER_CLUB;
                       const overBudget = !isPicked && p.price > remaining;
-                      const disabled = !isPicked && (chosen.length >= 15 || capReached);
+                      const disabled =
+                        !isPicked && (chosen.length >= SQUAD_SIZE || capReached || clubFull);
                       const isCaptain = captainId === p.id;
                       return (
                         <div
@@ -222,6 +259,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                           className={`flex items-center gap-3 border-t border-line-soft px-4 py-2.5 sm:px-6 ${
                             isPicked ? "bg-surface-800" : ""
                           } ${disabled || overBudget ? "opacity-[.42]" : ""}`}
+                          title={clubFull ? `${MAX_PER_CLUB} max from ${p.team_short}` : undefined}
                         >
                           <button
                             type="button"
@@ -251,8 +289,11 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                                   </span>
                                 )}
                               </span>
+                              {/* The reason a disabled row is disabled, in the same
+                                  place the over-budget reason already appears. */}
                               <span className="mt-px block text-eyebrow tracking-normal text-ink-600">
                                 {p.team_short} · {p.position}
+                                {clubFull && ` · ${MAX_PER_CLUB} max from ${p.team_short}`}
                                 {overBudget && ` · over budget by £${(p.price - remaining).toFixed(1)}`}
                               </span>
                             </span>
@@ -304,6 +345,21 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                     );
                   })}
                 </div>
+                {/* Per-club counts — unobtrusive, but it explains why a row went
+                    grey before the user has to hunt for the reason. */}
+                {clubTally.length > 0 && (
+                  <p className="mt-3 m-0 text-eyebrow leading-relaxed tracking-normal text-ink-700">
+                    <span className="text-ink-600">Clubs</span>{" "}
+                    {clubTally.map(([club, n], i) => (
+                      <span key={club} className={n >= MAX_PER_CLUB ? "text-ink-0" : undefined}>
+                        {i > 0 && " · "}
+                        {club} {n}
+                      </span>
+                    ))}
+                    {clubTally.some(([, n]) => n >= MAX_PER_CLUB) && ` · ${MAX_PER_CLUB} max each`}
+                  </p>
+                )}
+
                 <div className="mt-3.5 border-t border-line pt-3.5">
                   <div className="mb-2 text-[11px] font-semibold uppercase tracking-[.1em] text-ink-700">Captain</div>
                   {captainId && picked[captainId] ? (
@@ -333,7 +389,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                     setEmail={setEmail}
                     onSubmit={submit}
                     disabled={!complete}
-                    remaining={15 - chosen.length}
+                    remaining={SQUAD_SIZE - chosen.length}
                   />
                 </div>
               </div>
@@ -349,7 +405,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
             <div className="shrink-0 border-t border-line-dim bg-surface-850 px-4 pb-4 pt-3 sm:hidden">
               <div className="mb-2 flex items-baseline justify-between">
                 <span className="text-eyebrow font-semibold uppercase tracking-[.06em] text-ink-500">
-                  {chosen.length} of 15 picked
+                  {chosen.length} of {SQUAD_SIZE} picked
                 </span>
                 <span className={`text-label font-semibold ${remaining < 0 ? "text-out-red" : ""}`}>
                   £{spent.toFixed(1)} / £100.0
@@ -362,7 +418,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                   setEmail={setEmail}
                   onSubmit={submit}
                   disabled={!complete}
-                  remaining={15 - chosen.length}
+                  remaining={SQUAD_SIZE - chosen.length}
                 />
               </div>
             </div>

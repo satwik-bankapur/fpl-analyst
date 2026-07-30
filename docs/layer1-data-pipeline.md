@@ -250,6 +250,27 @@ Archive routine (runs once):
 4. Record rollover in a `meta` key-value row (`season_current = '2026-27'`).
 ⚠ Without this routine, the new-season sync silently destroys the only data pre-season analysis can use.
 
+**DRIFT NOTE 2026-07-30 — the detection has a blind spot, and here is the recovery path.**
+`detect_rollover()` compares the LOCAL db against the FETCHED bootstrap. If no sync runs between the last finished gameweek and the API's season reset, the transition is never observed: `players` is overwritten with the new season's blank slate, `players_archive` stays empty, and nothing errors. This happened on the live local DB before 2026-07-30.
+
+The failure is not visible as a failure. With an empty archive, `_resolve_preseason` falls through to the (position, price-band) baseline for *every* player (§6.4), so every `ep` is near-identical and the only remaining differentiator is clean-sheet + save points — which floats goalkeepers to the top of the table and makes the recommended captain a keeper. The engine is behaving exactly as specced; it has no data.
+
+Recovery, idempotent and committed (`fpl/backfill.py`, `tests/test_backfill.py`):
+
+```bash
+python -m fpl backfill-archive --season 2025-26 --from tests/assets/bootstrap_2025-26.json
+python -m fpl sync          # recompute ep_scores through the archive path
+```
+
+- Parses any saved end-of-season `bootstrap-static` payload into `players_archive` rows via the same `parse_player` the sync uses.
+- Every row for that season is deleted and rewritten in one transaction, so re-running replaces rather than duplicates.
+- **Refuses to run if that season already has rows** unless `--force` — overwriting a real rollover's archive is the one thing it must not do by accident.
+- The command does NOT sync for you. It is offline and deterministic; the sync that follows hits the live API, and chaining them would hide which half failed.
+
+To recover a season whose bootstrap was never saved locally, fetch a snapshot of it first — the command takes any file on disk with an `elements` list.
+
+**Not fixed, worth knowing (same date):** `promoted_team_ids` in `build_context()` is derived by comparing current `teams.id` against archived `team_id`. FPL reassigns team ids alphabetically every season, so ids 1..20 collide across seasons and the set comes out empty — promoted-club players get `no_history_fallback` rather than `promoted_team_fallback`, and skip the `PROMOTED_DISCOUNT`. Both paths are honest and flagged, so this degrades the discount, not the truthfulness. Fixing it means matching on `short_name`, which the archive does not carry.
+
 ### 6.3 Pre-season input path
 `entry/{id}/event/1/picks/` 404s for everyone until GW1. Two supported inputs:
 - **Manual draft entry**: frontend 15-player picker (or paste-a-list parser) → stored in `draft_squads` → brief keyed on `draft_id`, `gameweek = 0`.

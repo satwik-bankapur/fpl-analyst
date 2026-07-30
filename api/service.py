@@ -18,6 +18,7 @@ from fpl.models import (
 )
 from fpl.sync import derive_mode, next_gameweek, sync_fpl
 from graph.cache import get_or_generate
+from graph.config import MAX_PER_CLUB, POSITION_QUOTA, SQUAD_BUDGET, SQUAD_SIZE
 from graph.data import load_teams
 from graph.deps import Deps
 from graph.nodes.squad_analyst import resolve_squad
@@ -45,6 +46,80 @@ def get_deps() -> Deps:
     FPL client. The IN_SEASON team path builds a client on demand (Stage B).
     """
     return Deps(session_factory=SessionLocal, client=None)
+
+
+# --- draft validation ------------------------------------------------------
+
+class InvalidDraft(Exception):
+    """A submitted draft breaks an FPL squad rule. Carries a specific code."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(code)
+
+
+def validate_draft(deps: Deps, player_ids: list[int], captain_id: int | None) -> None:
+    """Reject an illegal draft squad. Raises InvalidDraft; returns None if legal.
+
+    POST /api/brief is PUBLIC and unauthenticated. The picker enforces the same
+    rules client-side, but that is a courtesy to the user, not a control — a
+    hand-rolled request bypasses it completely. Everything the picker prevents is
+    re-checked here against the real `players` rows, because the client's idea of
+    a player's price, position and club is not evidence.
+
+    Checks run cheapest-and-most-fundamental first so the error a caller gets
+    names the thing actually wrong with their squad, not a downstream symptom.
+    """
+    if len(player_ids) != SQUAD_SIZE:
+        raise InvalidDraft("squad_size",
+                           f"A squad is exactly {SQUAD_SIZE} players, got {len(player_ids)}.")
+    if len(set(player_ids)) != len(player_ids):
+        raise InvalidDraft("duplicate_players", "The same player appears more than once.")
+
+    with deps.session_factory() as session:
+        rows = session.scalars(select(Player).where(Player.id.in_(player_ids))).all()
+
+    found = {p.id: p for p in rows}
+    missing = [pid for pid in player_ids if pid not in found]
+    if missing:
+        raise InvalidDraft("unknown_players",
+                           f"Unknown player ids: {sorted(missing)}.")
+
+    counts: dict[int, int] = {}
+    clubs: dict[int, int] = {}
+    total = 0.0
+    for pid in player_ids:
+        p = found[pid]
+        counts[p.position] = counts.get(p.position, 0) + 1
+        clubs[p.team_id] = clubs.get(p.team_id, 0) + 1
+        total += float(p.price)
+
+    if counts != POSITION_QUOTA:
+        want = "/".join(str(POSITION_QUOTA[k]) for k in sorted(POSITION_QUOTA))
+        got = "/".join(str(counts.get(k, 0)) for k in sorted(POSITION_QUOTA))
+        raise InvalidDraft("position_counts",
+                           f"A squad is {want} GK/DEF/MID/FWD, got {got}.")
+
+    # Compare on rounded £0.1m: prices are Numeric(4,1), so a squad that sums to
+    # exactly 100.0 must not fail on binary float dust.
+    if round(total, 1) > SQUAD_BUDGET:
+        raise InvalidDraft("budget_exceeded",
+                           f"Squad costs £{round(total, 1)}m, budget is £{SQUAD_BUDGET}m.")
+
+    over = [tid for tid, n in clubs.items() if n > MAX_PER_CLUB]
+    if over:
+        with deps.session_factory() as session:
+            teams = load_teams(session)
+        named = ", ".join(
+            f"{teams.get(tid, {}).get('short_name', tid)} ({clubs[tid]})" for tid in over
+        )
+        raise InvalidDraft("club_over_cap",
+                           f"Max {MAX_PER_CLUB} players from one club: {named}.")
+
+    if captain_id is not None and captain_id not in found:
+        raise InvalidDraft("captain_not_in_squad",
+                           "The captain must be one of the 15 selected players.")
 
 
 # --- draft persistence -----------------------------------------------------

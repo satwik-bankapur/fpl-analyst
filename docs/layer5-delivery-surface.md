@@ -141,6 +141,17 @@ Definition of done (Layer 5 overall): Stage A live on real domains; a sandbox Pa
 Dated corrections/extensions from the Stage A build. The spec above is the intent;
 these record where the code diverges and why.
 
+**2026-07-30 — `POST /api/brief` now validates the squad server-side.**
+
+- The draft path accepted whatever squad it was given. Position caps, the £100.0m budget and the 3-per-club rule existed only in the picker, which is a courtesy to the user and not a control — `curl` bypassed all of them, and a nonsense squad produced a nonsense brief on a **public, unauthenticated** endpoint.
+- `service.validate_draft()` now re-checks every rule against the real `players` rows and returns **400** with a specific code: `squad_size`, `duplicate_players`, `unknown_players`, `position_counts`, `budget_exceeded`, `club_over_cap`, `captain_not_in_squad`. Detail shape is the existing `{"error": code, "message": "..."}`. Validation runs **before** persistence, so a rejected squad leaves no `draft_squads` row and no email signup behind.
+- `captain_id` stays optional — the Strategist picks its own captain, so absent is not invalid. Only a captain *outside* the 15 is rejected.
+- The exact-15 check moved out of the pydantic model (`min_length=15`) and into the validator, so squad-size errors arrive as a 400 with a code alongside every other squad rule instead of a lone 422. The model keeps `max_length=100` as a payload bound.
+- **The numbers now live in exactly one place**: `MAX_PER_CLUB`, `SQUAD_SIZE`, `POSITION_QUOTA`, `SQUAD_BUDGET` in `graph/config.py`, imported by MarketScout and the validator and mirrored once in `web/lib/api.ts` (asserted by `tests/test_api.py::test_the_club_cap_is_one_shared_constant`). The picker imports them from that mirror; no component re-types a literal.
+- **Picker UI**: the `+` button is disabled at the club cap with the reason inline ("3 max from ARS"), matching how the over-budget reason already surfaces, and the desktop rail carries a per-club tally. A 400 from the server is now shown as its own message rather than as "the writing step didn't come back" — reaching one means the picker and the validator disagree.
+- **Picker sort order**: within each position group, rows are sorted by **price descending**. `/api/players` returns element-id order and FPL assigns ids club-by-club alphabetically, so the old order was effectively "Arsenal first" and the per-group 60-row cap then truncated mid-alphabet — every recognisable player was out of reach without a search.
+- **`cached` is no longer rendered.** `BriefView` showed "From cache" in the meta line. Whether a brief came from the cache is an operational detail; the field stays on the response for logs and DEBUG.
+
 **2026-07-11 — Stage A backend (`api/`) built; Stage B untouched.**
 
 - **Env-name mapping.** Spec §5 lists `DATABASE_URL`; the DB engine is owned by Layer 1 (`fpl/config.py`, env `FPL_DATABASE_URL`) — so **`DATABASE_URL` in this spec = `FPL_DATABASE_URL` in prod**. The delivery-only secrets/knobs (`ADMIN_TOKEN`, `RESEND_API_KEY`, `SEND_FROM`, `FRONTEND_ORIGIN`, `BRIEF_TOKEN_SECRET`) are read under their bare spec names by `api/config.py`.

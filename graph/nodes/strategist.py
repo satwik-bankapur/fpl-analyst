@@ -59,8 +59,13 @@ def strategist(state: BriefState, deps: Deps) -> dict:
     diff_note = None
     gap = round(ep(pick_id) - ep(vice_id), 2)
     if len(ranked) > 1 and gap <= CAPTAIN_DIFF_EP_GAP and own(vice_id) < CAPTAIN_DIFF_MAX_OWNERSHIP:
-        diff_note = (f"vice ({vice_id}) is within {gap} ep of the captain and only "
-                     f"{own(vice_id)}% owned — a differential captaincy option")
+        # A PREDICATE about the vice, not a whole sentence, and deliberately
+        # id-free: the layer3 §2.4 spec said "with both ids", but pick_id and
+        # vice_id are already fields on this object, so repeating the id here only
+        # ever leaked "vice (413)" into reader-facing copy via the stub writer.
+        # Whoever renders it owns the name. See the 2026-07-30 drift note.
+        diff_note = (f"is within {gap} projected points of the captain and only "
+                     f"{own(vice_id)}% owned — a real differential")
     captain = CaptainDecision(pick_id=pick_id, vice_id=vice_id, differential_note=diff_note)
     reasoning.append(f"captain_ep:{round(ep(pick_id), 2)}")
 

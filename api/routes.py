@@ -34,7 +34,11 @@ def _valid_email(v: str | None) -> str | None:
 # --- request models --------------------------------------------------------
 
 class Draft(BaseModel):
-    player_ids: list[int] = Field(min_length=15, max_length=15)
+    # The exact-15 rule is enforced in `service.validate_draft`, not here, so the
+    # caller gets a 400 with a specific `squad_size` code alongside every other
+    # squad-rule rejection — rather than one lone 422 from pydantic. max_length
+    # stays as a payload bound so a million-id body is refused before any DB work.
+    player_ids: list[int] = Field(min_length=1, max_length=100)
     captain_id: int | None = None
 
 
@@ -83,6 +87,13 @@ def _require_admin(authorization: str = Header(default="")) -> None:
 @router.post("/brief")
 def post_brief(body: BriefRequest, request: Request, deps: Deps = Depends(get_deps)):
     if body.draft is not None:
+        # Validate BEFORE persisting: an illegal squad must not leave a draft row
+        # (or an email signup) behind for a brief that will never be generated.
+        try:
+            service.validate_draft(deps, body.draft.player_ids, body.draft.captain_id)
+        except service.InvalidDraft as e:
+            raise HTTPException(status_code=400,
+                                detail={"error": e.code, "message": e.message})
         did = service.create_draft(
             deps, body.draft.player_ids, body.draft.captain_id,
             body.email)

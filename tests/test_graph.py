@@ -165,6 +165,118 @@ def test_real_stub_output_splits_to_canonical_keys(golden):
                 assert line.strip() not in blob
 
 
+def test_stub_output_leaks_no_internals(golden):
+    """The stub IS the product until the LLM writer is wired in (2026-07-30).
+
+    It used to print the upstream contracts raw — problem-type slugs, severity
+    numbers, reasoning codes, engine flags, column names, player ids. Those are
+    ours, not the reader's. Every token below appeared in a real brief served on
+    localhost; none may appear again.
+    """
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+    md = final.brief_md
+
+    banned = [
+        # problem-type slugs (graph/state.py PROBLEM_TYPES)
+        "dead_bench_spot", "injury_doubt", "fixture_cliff", "cold_form",
+        "blank_exposure", "unavailable:",
+        # severity / reasoning-code / flag scaffolding
+        "sev1", "sev2", "sev3", "codes:", "delta:", "problem:", "severity:",
+        "flag:", "no_qualifying_delta", "transfer:roll", "captain_ep:",
+        "swing_team:", "double_gw_players:", "no_history_fallback",
+        "promoted_team_fallback", "thin_minutes_sample", "early_season_blend",
+        # raw field / column names
+        "ep_next4", "minutes_prob", "chance_of_playing", "ownership_pct",
+        "data_basis", "match_method", "config_version", "pid:", "swing:",
+        # the action enum and the stub's old shouty verbs
+        "MAKE:", "ROLL:",
+    ]
+    hits = [tok for tok in banned if tok in md]
+    assert not hits, f"stub leaked internals: {hits}\n---\n{md}"
+
+    # ...and no bare `key:value` debug pair survived in a bullet.
+    for line in md.splitlines():
+        body = line.lstrip("- ").strip()
+        if body.startswith(("#", ">", "_")):
+            continue
+        assert "·  sev" not in body
+
+
+@pytest.mark.parametrize("kind,evidence,expected", [
+    ("unavailable", ["status:i", "Ankle injury - expected back 15 Sep",
+                     "unavailable:i"],
+     "Saka is not available to play — Ankle injury - expected back 15 Sep."),
+    ("injury_doubt", ["chance_of_playing:50%", "Knock", "injury_doubt:50%"],
+     "Saka is doubtful, rated 50% likely to play — Knock."),
+    ("fixture_cliff", ["swing:-1.2", "team:ARS"],
+     "Saka's fixtures get harder from here (ARS face a difficult run)."),
+    ("cold_form", ["form:1.2", "ppg:5.0", "minutes_prob:0.95"],
+     "Saka is scoring below his own season average right now "
+     "(1.2 recently against 5.0 per game)."),
+    ("dead_bench_spot", ["ep_next4:0.48"],
+     "Saka is projected to return only 0.5 points over the next four "
+     "gameweeks, so he adds little from the bench."),
+])
+def test_every_problem_type_has_a_plain_english_sentence(kind, evidence, expected):
+    """The golden squad only ever raises cold_form and dead_bench_spot, so the
+    other problem types are covered here directly — otherwise a raw
+    `[fixture_cliff · sev2]` could come back unnoticed."""
+    from graph.nodes.writer import _problem_sentence
+
+    assert _problem_sentence(kind, "Saka", evidence) == expected
+
+
+def test_blank_exposure_counts_players_not_ids():
+    from graph.nodes.writer import _problem_sentence
+
+    sentence = _problem_sentence(
+        "blank_exposure", "your squad",
+        ["4 starters blank in the next-4 horizon", "pid:1", "pid:2", "pid:3", "pid:4"])
+    assert sentence == ("4 of your starters have a gameweek with no fixture in "
+                       "the next four.")
+    assert "pid" not in sentence
+
+
+def test_reasoning_codes_become_notes_or_are_dropped():
+    from graph.nodes.writer import _code_notes, _delta
+
+    codes = ["delta:+2.45", "problem:unavailable", "severity:3",
+             "flag:no_history_fallback", "flag:thin_minutes_sample",
+             "flag:blank_gw:41"]
+    notes = _code_notes(codes)
+
+    assert len(notes) == 2, notes                     # the two explainable flags
+    assert all("_" not in n and ":" not in n for n in notes)
+    # problem/severity/delta are scaffolding or said elsewhere — never echoed.
+    assert not any("unavailable" in n or "3" in n for n in notes)
+    assert _delta(codes) == 2.45
+
+
+def test_stub_captaincy_never_prints_a_raw_player_id(golden):
+    """The differential note used to render as "vice (413) is within...".
+
+    Guarded here rather than in the strategist because the note is a predicate
+    now: whoever renders it owns the name (layer3 §2.4 drift note, 2026-07-30).
+    """
+    SF, deps, client, anchor = golden
+    state = BriefState(request=RequestCtx(
+        mode="IN_SEASON", fpl_team_id=123, gameweek_anchor=anchor, requested_at=_now()))
+    final = run_brief(state, deps)
+
+    note = final.decisions.captain.differential_note
+    if note:
+        assert str(final.decisions.captain.vice_id) not in note
+        assert "ep" not in note.split()
+    captaincy = split_sections(final.brief_md)["captaincy"]
+    # Every squad id, and the fallback "#id" spelling load_players uses.
+    for pk in final.squad.picks:
+        assert f"#{pk.player_id}" not in captaincy
+        assert f"({pk.player_id})" not in captaincy
+
+
 def test_chips_section_appears_only_when_stance_is_not_hold(golden):
     """`chips` is spec'd as conditional (layer4 §3). Rendering it on a plain hold
     would put an empty paid section on the lock card."""
