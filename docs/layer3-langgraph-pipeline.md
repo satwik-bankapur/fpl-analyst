@@ -61,6 +61,26 @@ Steps:
 - `free_transfers`: NOT reliably available from the API. v1 rule: assume 1, emit warning `"free_transfers_assumed"`. (v1.1: infer from transfer history endpoint.)
 - `captain_current`: player_id
 
+**DRIFT NOTE 2026-07-30 — draft resolution now COMPUTES the starting XI instead of trusting slot order.**
+
+Step 1 loads a `draft_squads` row and step 3 reports `squad_ep_gw` / `squad_ep_next4` for "slots 1–11". For the live IN_SEASON path that is the manager's real lineup. For the **draft path it was submission order** — FPL has no lineup concept before a gameweek opens, so the fifteen arrive as an unordered set and the first eleven were whichever ones the picker happened to serialise first. The pipeline then diagnosed an arbitrary eleven, benched whoever fell past index 11, and printed the result as though it were the reader's team. A demo brief benched Haaland.
+
+`_resolve_draft` now orders the fifteen before assigning slots (`_draft_slots` in `graph/nodes/squad_analyst.py`):
+
+- **XI**: maximises summed anchor-GW `ep` subject to the FPL formation rules — exactly 1 GK, 3–5 DEF, 2–5 MID, 1–3 FWD, 11 total. Exact rather than heuristic: within a fixed formation the positions are independent, so top-n per position is optimal, and there are only eight legal formations to enumerate. Ties break on player id so the result is deterministic.
+- **Captain**: stays the user's pick. If the optimiser leaves them out they are swapped back in over the lowest-`ep` starter whose departure still leaves a legal formation. This costs projected points by construction — that is the point. Never silently override an explicit choice.
+- **Bench**: the remaining four, `ep_next4` desc, with the backup keeper pinned to the first bench slot (FPL never substitutes an outfielder for a keeper, so a bench GK's place in the order is fixed, not earned).
+- **Fallback**: a fifteen with no legal formation (a draft row predating the layer5 server-side squad validation) keeps submission order rather than inventing a lineup, and does not error.
+
+The Writer adds one line to the verdict on the draft path only — "Best XI picked from your 15" — because the projection is misleading if the reader assumes it describes their own eleven.
+
+Two consequences worth knowing:
+
+1. **Submission order no longer affects brief content at all.** It used to, invisibly, while `compute_input_hash` hashed ids and multipliers but *not* order — so two managers who picked the same fifteen in different orders got different briefs that collided on one cache key. That latent bug is closed by construction.
+2. **`STUB_MODEL` is now part of the cache key** (`graph/cache.py`, bumped to `stub-template-v2`). A template change was previously invisible to the cache, so anyone who had already generated a brief would have kept receiving the old prose forever — both this change and the humanised phrasing would have shipped unseen. Bumping it invalidates every cached brief exactly once, the same deliberate mass-miss the curated-version tags cause.
+
+Tests: `tests/test_graph.py::test_the_highest_ep_player_starts_even_when_submitted_last`, `::test_formation_constraints_hold_on_a_skewed_squad`, `::test_a_captain_outside_the_optimal_xi_is_never_benched`, `::test_an_illegal_fifteen_falls_back_to_submission_order`, `::test_submission_order_no_longer_changes_the_brief`.
+
 ### 2.2 MarketScout (deterministic)
 
 Does: scans the global `ep_scores` table for actionable alternatives.

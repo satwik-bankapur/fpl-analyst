@@ -27,6 +27,128 @@ def _f(x) -> float:
     return float(x) if x is not None else 0.0
 
 
+# --- starting XI selection (draft path only) -------------------------------
+# A draft squad is fifteen names in submission order. FPL has no lineup concept
+# before a gameweek opens, so slots 1–15 used to be pick order and the pipeline
+# analysed — and reported on — an ARBITRARY eleven. That is how a demo brief came
+# to bench Haaland. Since 2026-07-30 the draft path COMPUTES the XI; see the
+# layer3 §2.1 drift note.
+#
+# The live IN_SEASON path is untouched: there, slots come from the manager's real
+# lineup and are not ours to second-guess.
+XI_SIZE = 11
+BENCH_SIZE = 4
+# position -> (min, max) in a legal starting XI. 1 GK, 3–5 DEF, 2–5 MID, 1–3 FWD.
+FORMATION_LIMITS = {1: (1, 1), 2: (3, 5), 3: (2, 5), 4: (1, 3)}
+GK = 1
+
+
+def _legal_formations() -> list[dict[int, int]]:
+    """Every position split that makes a legal XI (there are eight)."""
+    out = []
+    for d in range(*_span(2)):
+        for m in range(*_span(3)):
+            f = XI_SIZE - FORMATION_LIMITS[GK][0] - d - m
+            if FORMATION_LIMITS[4][0] <= f <= FORMATION_LIMITS[4][1]:
+                out.append({1: 1, 2: d, 3: m, 4: f})
+    return out
+
+
+def _span(pos: int) -> tuple[int, int]:
+    lo, hi = FORMATION_LIMITS[pos]
+    return lo, hi + 1
+
+
+def _is_legal(counts: dict[int, int]) -> bool:
+    if sum(counts.values()) != XI_SIZE:
+        return False
+    return all(lo <= counts.get(pos, 0) <= hi for pos, (lo, hi) in FORMATION_LIMITS.items())
+
+
+def _best_xi(player_ids, players, ep) -> list[int] | None:
+    """The highest summed anchor-GW `ep` eleven that satisfies the formation rules.
+
+    Exact, not a heuristic: within a fixed formation the positions are
+    independent, so taking the top-n per position is optimal — and there are only
+    eight formations to try. Returns None when the fifteen cannot field a legal
+    XI at all (a draft row predating server-side squad validation), in which case
+    the caller keeps submission order rather than inventing something.
+    """
+    by_pos: dict[int, list[int]] = {}
+    for pid in player_ids:
+        pos = players.get(pid, {}).get("position")
+        if pos is not None:
+            by_pos.setdefault(pos, []).append(pid)
+    for pos in by_pos:                       # ep desc, id as a stable tie-break
+        by_pos[pos].sort(key=lambda pid: (-ep(pid), pid))
+
+    best, best_total = None, None
+    for form in _legal_formations():
+        if any(len(by_pos.get(pos, [])) < n for pos, n in form.items()):
+            continue
+        xi = [pid for pos, n in sorted(form.items()) for pid in by_pos[pos][:n]]
+        total = sum(ep(pid) for pid in xi)
+        if best_total is None or total > best_total:
+            best, best_total = xi, total
+    return best
+
+
+def _keep_captain_starting(xi: list[int], captain_id, players, ep) -> list[int]:
+    """Never bench the user's captain silently.
+
+    The captain is the one pick the manager actually made, so if the optimiser
+    leaves them out we swap them back in over the lowest-`ep` starter whose
+    departure still leaves a legal formation. Costs projected points by
+    construction — that is the point; the alternative is quietly overriding an
+    explicit choice.
+    """
+    if captain_id is None or captain_id in xi:
+        return xi
+    cap_pos = players.get(captain_id, {}).get("position")
+    if cap_pos is None:
+        return xi
+
+    counts: dict[int, int] = {}
+    for pid in xi:
+        pos = players.get(pid, {}).get("position")
+        counts[pos] = counts.get(pos, 0) + 1
+
+    for out in sorted(xi, key=lambda pid: (ep(pid), pid)):
+        out_pos = players.get(out, {}).get("position")
+        trial = dict(counts)
+        trial[out_pos] = trial.get(out_pos, 0) - 1
+        trial[cap_pos] = trial.get(cap_pos, 0) + 1
+        if _is_legal(trial):
+            return [captain_id if pid == out else pid for pid in xi]
+    return xi
+
+
+def _draft_slots(player_ids, captain_id, players, ep_map) -> list[int]:
+    """Order the fifteen as [XI…, bench…]; index+1 becomes the pick slot.
+
+    Bench order is ep_next4 desc with the backup keeper pinned to the first bench
+    slot — FPL's substitution rules never bring an outfielder on for a keeper, so
+    a bench GK's position in the order is fixed, not earned.
+    """
+    def ep(pid):
+        return ep_map.get(pid, {}).get("ep", 0.0)
+
+    def ep4(pid):
+        return ep_map.get(pid, {}).get("ep_next4", 0.0)
+
+    xi = _best_xi(player_ids, players, ep)
+    if xi is None:
+        return list(player_ids)              # not a legal fifteen — leave it alone
+    xi = _keep_captain_starting(xi, captain_id, players, ep)
+
+    starting = set(xi)
+    bench = [pid for pid in player_ids if pid not in starting]
+    bench_gk = [pid for pid in bench if players.get(pid, {}).get("position") == GK]
+    bench_out = sorted((pid for pid in bench if pid not in bench_gk),
+                       key=lambda pid: (-ep4(pid), pid))
+    return xi + bench_gk + bench_out
+
+
 def resolve_squad(state: BriefState, deps: Deps):
     """Squad resolution only (no diagnosis) — used by the cache layer to compute
     input_hash before deciding whether to run the full graph. Returns (SquadCtx, err)."""
@@ -35,7 +157,11 @@ def resolve_squad(state: BriefState, deps: Deps):
         anchor = resolve_ep_anchor(session) or 0
         if req.mode == "IN_SEASON":
             return _resolve_live(deps.client, req, anchor)
-        return _resolve_draft(session, req, load_players(session))
+        # The draft path needs EP to compute the XI, so this is no longer a
+        # players-only read — the cache's input_hash is unaffected either way
+        # (it hashes ids and multipliers, never slots).
+        return _resolve_draft(session, req, load_players(session),
+                              load_ep_map(session, anchor))
 
 
 def squad_analyst(state: BriefState, deps: Deps) -> dict:
@@ -54,7 +180,7 @@ def squad_analyst(state: BriefState, deps: Deps) -> dict:
         if req.mode == "IN_SEASON":
             squad, err = _resolve_live(deps.client, req, anchor)
         else:
-            squad, err = _resolve_draft(session, req, players)
+            squad, err = _resolve_draft(session, req, players, ep_map)
         if err is not None:
             return {"error": err}
 
@@ -106,7 +232,7 @@ def _resolve_live(client, req, anchor: int):
     return squad, None
 
 
-def _resolve_draft(session, req, players):
+def _resolve_draft(session, req, players, ep_map):
     if req.draft_id is None:
         return None, PipelineError(code="no_picks_yet", message="No draft squad id provided.")
     draft = load_draft_squad(session, req.draft_id)
@@ -115,12 +241,14 @@ def _resolve_draft(session, req, players):
             code="no_picks_yet", message="Draft squad not found — create one first."
         )
     cap = draft["captain_id"]
-    # Pre-season draft is an ordered 15: slots 1–11 start, 12–15 bench (order = the
-    # manager's chosen XI; the sample fixture preserves the real GW lineup order).
+    # Slots 1–11 start, 12–15 bench. The ORDER is computed, not submitted: a draft
+    # squad has no lineup, so trusting the order the player ids arrived in meant
+    # analysing an arbitrary eleven (2026-07-30, layer3 §2.1 drift note).
+    ordered = _draft_slots(draft["player_ids"], cap, players, ep_map)
     picks = [
         Pick(player_id=pid, slot=i, is_captain=(pid == cap), is_vice=False,
              multiplier=2 if pid == cap else 1)
-        for i, pid in enumerate(draft["player_ids"], 1)
+        for i, pid in enumerate(ordered, 1)
     ]
     squad_value = round(sum(players.get(pid, {}).get("price", 0.0)
                             for pid in draft["player_ids"]), 1)

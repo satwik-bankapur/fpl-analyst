@@ -38,7 +38,11 @@ from ..deps import Deps
 from ..sections import SECTION_TITLES
 from ..state import BriefState
 
-STUB_MODEL = "stub-template-v1"
+# Bumped when the template's OUTPUT changes, because `graph.cache` mixes this into
+# the brief input_hash: a writer change must invalidate every cached brief exactly
+# once, or readers keep being served the previous template's prose forever.
+# v1 -> v2 (2026-07-30): humanised phrasing, then computed draft XI.
+STUB_MODEL = "stub-template-v2"
 
 # --- the phrasebook --------------------------------------------------------
 # Evidence keys the upstream nodes emit as "key:value" (layer3 §2.1). Anything
@@ -183,6 +187,11 @@ def writer(state: BriefState, deps: Deps) -> dict:
     L.append(f"\n## {SECTION_TITLES['verdict']}")
     L.append(f"- Your starting eleven projects {diag.squad_ep_gw} points this gameweek "
              f"and {diag.squad_ep_next4} over the next four, counting the captain double.")
+    if state.request.draft_id is not None:
+        # A draft has no lineup, so the eleven above is one we chose. Say so —
+        # the projection means nothing if the reader assumes it is their own XI.
+        L.append("- Best XI picked from your 15: a draft has no set lineup, so the "
+                 "eleven above were chosen on projected points.")
     if diag.problems:
         L.append(f"- {len(diag.problems)} thing"
                  f"{'' if len(diag.problems) == 1 else 's'} worth your attention:")

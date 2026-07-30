@@ -368,6 +368,167 @@ def _preseason_state(did):
 
 
 # ===========================================================================
+# Draft XI selection (layer3 §2.1 drift note, 2026-07-30)
+#
+# A draft squad is fifteen names in submission order. Slots used to BE that
+# order, so the pipeline analysed an arbitrary eleven and the brief reported its
+# projection as if it were the reader's lineup — which is how a demo brief came
+# to bench Haaland. These fix the rule, not the symptom.
+# ===========================================================================
+
+def _fifteen(teams=4):
+    """A legal 2/5/5/3 fifteen spread over enough clubs, ids grouped by position.
+
+    GK 1-2 · DEF 11-15 · MID 21-25 · FWD 31-33.
+    """
+    spec = [(1, 2, 1), (11, 5, 2), (21, 5, 3), (31, 3, 4)]
+    players, ids = [], []
+    for start, count, pos in spec:
+        for n in range(count):
+            pid = start + n
+            players.append(_P(pid, (pid % teams) + 1, position=pos))
+            ids.append(pid)
+    return players, ids
+
+
+def _xi_of(final):
+    return [pk.player_id for pk in final.squad.picks if pk.slot <= 11]
+
+
+def _bench_of(final):
+    return [pk.player_id for pk in sorted(final.squad.picks, key=lambda pk: pk.slot)
+            if pk.slot >= 12]
+
+
+def _run_draft(players, ep_rows, ids, captain):
+    teams = [_T(t, f"T{t}") for t in range(1, 5)]
+    engine, SF = _build_db(teams, players, ep_rows)
+    try:
+        did = _draft(SF, ids, captain)
+        deps = Deps(session_factory=SF, client=None)
+        return run_brief(_preseason_state(did), deps)
+    finally:
+        engine.dispose()
+
+
+def test_the_highest_ep_player_starts_even_when_submitted_last():
+    """The Haaland case: naive slot order benched the best player in the squad."""
+    players, ids = _fifteen()
+    star = 33                                   # a FWD, submitted last of fifteen
+    ep_rows = [_EP(pid, ep=3.0, ep4=12.0) for pid in ids if pid != star]
+    ep_rows.append(_EP(star, ep=9.9, ep4=40.0))
+    # Submission order alone would put him at slot 15 — benched.
+    assert ids.index(star) + 1 == 15
+
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+    xi = _xi_of(final)
+
+    assert star in xi, "the highest-EP player in the squad must start"
+    assert star not in _bench_of(final)
+
+
+def test_formation_constraints_hold_on_a_skewed_squad():
+    """Five strong defenders cannot all start alongside a legal rest of the XI."""
+    players, ids = _fifteen()
+    defs = [11, 12, 13, 14, 15]
+    ep_rows = []
+    for pid in ids:
+        # Every DEF outscores every non-DEF, so an unconstrained optimiser would
+        # start all five and then some.
+        ep_rows.append(_EP(pid, ep=9.0 if pid in defs else 2.0, ep4=30.0))
+    final = _run_draft(players, ep_rows, ids, captain=defs[0])
+
+    xi = _xi_of(final)
+    pos = {p["id"]: p["position"] for p in players}
+    counts = {}
+    for pid in xi:
+        counts[pos[pid]] = counts.get(pos[pid], 0) + 1
+
+    assert len(xi) == 11
+    assert counts.get(1, 0) == 1, "exactly one goalkeeper starts"
+    assert counts.get(2, 0) == 5, "all five defenders start — that is the maximum"
+    assert 2 <= counts.get(3, 0) <= 5
+    assert 1 <= counts.get(4, 0) <= 3
+    # ...and the bench keeper sits in the first bench slot, per FPL's sub rules.
+    bench = _bench_of(final)
+    assert pos[bench[0]] == 1
+
+
+def test_a_captain_outside_the_optimal_xi_is_never_benched():
+    """The user's captain is the one pick they actually made. Keep them starting."""
+    players, ids = _fifteen()
+    dud = 25                                    # a MID nobody would start
+    ep_rows = [_EP(pid, ep=8.0, ep4=30.0) for pid in ids if pid != dud]
+    ep_rows.append(_EP(dud, ep=0.1, ep4=0.4))
+
+    # Sanity: uncaptained, he does not make the cut.
+    uncaptained = _xi_of(_run_draft(players, ep_rows, ids, captain=ids[0]))
+    assert dud not in uncaptained
+
+    final = _run_draft(players, ep_rows, ids, captain=dud)
+    xi = _xi_of(final)
+    pos = {p["id"]: p["position"] for p in players}
+    counts = {}
+    for pid in xi:
+        counts[pos[pid]] = counts.get(pos[pid], 0) + 1
+
+    assert dud in xi, "the captain must never be silently benched"
+    assert len(xi) == 11
+    assert counts.get(1, 0) == 1 and 3 <= counts.get(2, 0) <= 5
+    assert 2 <= counts.get(3, 0) <= 5 and 1 <= counts.get(4, 0) <= 3
+    assert next(pk for pk in final.squad.picks if pk.player_id == dud).is_captain
+
+
+def test_the_brief_says_the_xi_was_chosen():
+    """The projection is meaningless if the reader thinks it is their own lineup."""
+    players, ids = _fifteen()
+    ep_rows = [_EP(pid, ep=5.0, ep4=20.0) for pid in ids]
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+
+    assert "Best XI picked from your 15" in final.brief_md
+    verdict = split_sections(final.brief_md)["verdict"]
+    assert "Best XI picked from your 15" in verdict
+
+
+def test_an_illegal_fifteen_falls_back_to_submission_order():
+    """Draft rows predating server-side validation can be unfieldable.
+
+    Inventing a lineup for them would be worse than leaving the order alone —
+    and it must not crash the pipeline either way.
+    """
+    teams = [_T(t, f"T{t}") for t in range(1, 5)]
+    # No forwards and only two defenders: no legal formation exists.
+    players = ([_P(1, 1, position=1), _P(2, 2, position=1)]
+               + [_P(10 + n, (n % 4) + 1, position=2) for n in range(2)]
+               + [_P(20 + n, (n % 4) + 1, position=3) for n in range(11)])
+    ids = [p["id"] for p in players]
+    ep_rows = [_EP(pid, ep=5.0, ep4=20.0) for pid in ids]
+
+    final = _run_draft(players, ep_rows, ids, captain=ids[0])
+
+    assert final.error is None
+    assert [pk.player_id for pk in sorted(final.squad.picks, key=lambda pk: pk.slot)] == ids
+
+
+def test_submission_order_no_longer_changes_the_brief():
+    """Two managers who pick the same fifteen get the same analysis.
+
+    Before the XI was computed, shuffling the same squad produced a different
+    eleven — and the cache hashes ids, not order, so the two briefs also collided.
+    """
+    players, ids = _fifteen()
+    ep_rows = [_EP(pid, ep=float(pid % 7) + 1.0, ep4=float(pid % 5) + 10.0)
+               for pid in ids]
+
+    first = _run_draft(players, ep_rows, ids, captain=ids[0])
+    shuffled = list(reversed(ids))
+    second = _run_draft(players, ep_rows, shuffled, captain=ids[0])
+
+    assert _xi_of(first) == _xi_of(second)
+    assert first.brief_md == second.brief_md
+
+
+# ===========================================================================
 # §7.3 — 3-per-club filter
 # ===========================================================================
 
