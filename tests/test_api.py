@@ -554,6 +554,314 @@ def test_a_rejected_draft_is_not_persisted(golden_sf, client_for):
         assert s.scalar(select(func.count()).select_from(EmailSignup)) == 0
 
 
+# ===========================================================================
+# Admin console (2026-07-30) — /admin's read surface + the curated-table writes.
+#
+# The load-bearing test in this block is the no-bump pair. `max(updated_at)` on
+# team_notes / european_weeks IS half the brief cache key (docs/CLAUDE.md
+# "Configuration"), and the admin UI re-sends whatever is in the form on every
+# click. Without skip-if-identical, opening a note and pressing Save without
+# typing would invalidate every cached brief in the database.
+# ===========================================================================
+
+ADMIN_GETS = [
+    "/api/admin/overview",
+    "/api/admin/notes",
+    "/api/admin/euro-weeks",
+    "/api/admin/players",
+    "/api/admin/players?q=sa&flagged=true",
+    "/api/admin/fixtures/ARS",
+    "/api/admin/top",
+]
+
+ADMIN_POSTS = [
+    ("/api/admin/notes", {"team_id": 1, "note": "x"}),
+    ("/api/admin/euro-weeks", {"team_id": 1, "gameweek": 5,
+                               "competition": "UCL", "tie_importance": 2}),
+    ("/api/admin/euro-weeks/replace", {"rows": []}),
+]
+
+_AUTH = {"Authorization": "Bearer secret"}
+
+
+@pytest.mark.parametrize("path", ADMIN_GETS)
+def test_admin_reads_reject_missing_and_wrong_token(golden_sf, client_for, monkeypatch, path):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get(path, headers=_AUTH).status_code == 200
+
+
+@pytest.mark.parametrize("path,body", ADMIN_POSTS)
+def test_admin_writes_reject_missing_and_wrong_token(golden_sf, client_for, monkeypatch,
+                                                     path, body):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    assert client.post(path, json=body).status_code == 401
+    assert client.post(path, json=body,
+                       headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.post(path, json=body, headers=_AUTH).status_code == 200
+
+
+def test_admin_endpoints_closed_when_token_unset(golden_sf, client_for, monkeypatch):
+    """Empty ADMIN_TOKEN closes admin entirely — never open-by-misconfiguration."""
+    monkeypatch.setattr(settings, "admin_token", "")
+    client = client_for(golden_sf)
+    assert client.get("/api/admin/overview").status_code == 401
+    assert client.get("/api/admin/overview", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+# --- the cache-key rule ----------------------------------------------------
+
+def _notes_version(SF) -> str:
+    """Exactly what the brief cache key reads (graph.data.curated_notes_version)."""
+    from graph.data import curated_notes_version
+    with SF() as s:
+        return curated_notes_version(s)
+
+
+def test_saving_an_unchanged_note_does_not_bump_updated_at(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    body = {"team_id": 1, "note": "Arteta rotates the left back in Europe weeks."}
+
+    first = client.post("/api/admin/notes", json=body, headers=_AUTH)
+    assert first.status_code == 200 and first.json()["changed"] is True
+    with golden_sf() as s:
+        stamp = s.get(TeamNote, 1).updated_at
+    version = _notes_version(golden_sf)
+
+    # The no-op save: identical text, so nothing is written and the cache key holds.
+    again = client.post("/api/admin/notes", json=body, headers=_AUTH)
+    assert again.status_code == 200 and again.json()["changed"] is False
+    with golden_sf() as s:
+        assert s.get(TeamNote, 1).updated_at == stamp
+        assert s.get(TeamNote, 1).note == body["note"]
+    assert _notes_version(golden_sf) == version
+
+
+def test_saving_a_changed_note_does_bump_updated_at(golden_sf, client_for, monkeypatch):
+    """The other half: a real edit MUST invalidate, or briefs go stale silently."""
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+
+    client.post("/api/admin/notes", json={"team_id": 1, "note": "First."}, headers=_AUTH)
+    with golden_sf() as s:
+        stamp = s.get(TeamNote, 1).updated_at
+    version = _notes_version(golden_sf)
+
+    changed = client.post("/api/admin/notes",
+                          json={"team_id": 1, "note": "Second — pens changed hands."},
+                          headers=_AUTH)
+    assert changed.json()["changed"] is True
+    with golden_sf() as s:
+        assert s.get(TeamNote, 1).updated_at > stamp
+    assert _notes_version(golden_sf) != version
+
+
+def test_unchanged_euro_week_grid_does_not_bump(golden_sf, client_for, monkeypatch):
+    """Same rule on the grid save — the one most likely to be handed no edits."""
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    rows = [{"team_id": 1, "gameweek": 5, "competition": "UCL", "tie_importance": 3},
+            {"team_id": 2, "gameweek": 5, "competition": "UEL", "tie_importance": 2}]
+
+    assert client.post("/api/admin/euro-weeks/replace", json={"rows": rows},
+                       headers=_AUTH).json()["changed"] == 2
+    with golden_sf() as s:
+        stamps = {(r.team_id, r.gameweek): r.updated_at
+                  for r in s.scalars(select(EuropeanWeek))}
+
+    assert client.post("/api/admin/euro-weeks/replace", json={"rows": rows},
+                       headers=_AUTH).json()["changed"] == 0
+    with golden_sf() as s:
+        assert {(r.team_id, r.gameweek): r.updated_at
+                for r in s.scalars(select(EuropeanWeek))} == stamps
+
+    # Dropping a row is a real change: it must delete, and only that row.
+    assert client.post("/api/admin/euro-weeks/replace", json={"rows": rows[:1]},
+                       headers=_AUTH).json()["changed"] == 1
+    with golden_sf() as s:
+        remaining = list(s.scalars(select(EuropeanWeek)))
+        assert [(r.team_id, r.gameweek) for r in remaining] == [(1, 5)]
+        assert remaining[0].updated_at == stamps[(1, 5)]   # survivor untouched
+
+
+def test_euro_week_grid_rejects_duplicate_team_gameweek(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    dupe = {"team_id": 1, "gameweek": 5, "competition": "UCL", "tie_importance": 2}
+    r = client_for(golden_sf).post("/api/admin/euro-weeks/replace",
+                                   json={"rows": [dupe, dict(dupe, competition="UEL")]},
+                                   headers=_AUTH)
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "duplicate_team_gameweek"
+
+
+# --- flagged players -------------------------------------------------------
+
+@pytest.fixture
+def flagged_sf():
+    """Two scored players: one carrying an honesty flag, one clean.
+
+    Hand-seeded rather than taken from the golden season so the assertion is about
+    the endpoint's filter, not about which real player happened to be injured in
+    the frozen snapshot.
+    """
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool, future=True)
+    Base.metadata.create_all(engine)
+    SF = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with SF() as s, s.begin():
+        s.add(Team(**_T(1, "AAA")))
+        s.add(Player(**_P(1, 1, 4)))          # flagged
+        s.add(Player(**_P(2, 1, 3)))          # clean
+        s.add(EpScore(player_id=1, gameweek=1, ep=1.0, ep_next4=4.0, components={
+            "match_method": "element_id",
+            # One flag from each honesty family the endpoint recognises, plus two
+            # it must ignore (`double_gw`, `injury_doubt` are ordinary facts).
+            "flags": ["unavailable:i", "thin_minutes_sample", "no_history_fallback",
+                      "european_fixture_week:UCL:3", "double_gw:2", "injury_doubt:50%"],
+        }))
+        s.add(EpScore(player_id=2, gameweek=1, ep=2.0, ep_next4=8.0, components={
+            "match_method": "element_id", "flags": ["double_gw:2", "early_season_blend"],
+        }))
+    yield SF
+    engine.dispose()
+
+
+def test_flagged_players_returns_the_seeded_flagged_player(flagged_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(flagged_sf)
+
+    everyone = client.get("/api/admin/players", headers=_AUTH).json()
+    assert everyone["total"] == 2
+
+    only = client.get("/api/admin/players?flagged=true", headers=_AUTH).json()
+    assert only["total"] == 1
+    row = only["players"][0]
+    assert row["id"] == 1
+    assert row["ep_next4"] == 4.0
+    # The four honesty families are listed; the ordinary scoring facts are not.
+    assert row["flags"] == ["unavailable:i", "thin_minutes_sample",
+                            "no_history_fallback", "european_fixture_week:UCL:3"]
+
+
+def test_player_search_matches_on_name(flagged_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(flagged_sf)
+    assert client.get("/api/admin/players?q=P1", headers=_AUTH).json()["total"] == 1
+    assert client.get("/api/admin/players?q=zzz", headers=_AUTH).json()["total"] == 0
+
+
+# --- read-surface shapes ---------------------------------------------------
+
+def test_overview_reports_real_counts_and_match_methods(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    body = client_for(golden_sf).get("/api/admin/overview", headers=_AUTH).json()
+
+    assert body["mode"] == "IN_SEASON"
+    assert body["last_sync"] is not None
+    assert body["counts"]["players"] > 100
+    assert body["counts"]["ep_scores"] == body["counts"]["players"]
+    assert len(body["teams"]) == 20
+    with golden_sf() as s:
+        assert body["counts"]["fixtures"] == s.scalar(
+            select(func.count()).select_from(Fixture))
+    # Every scored player is accounted for in exactly one match_method bucket.
+    assert sum(body["match_method"].values()) == body["counts"]["ep_scores"]
+
+
+def test_notes_endpoint_lists_every_club_even_without_a_note(golden_sf, client_for, monkeypatch):
+    """The UI shows 20 cards; a club with no note still needs a card to type into."""
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    rows = client.get("/api/admin/notes", headers=_AUTH).json()
+    assert len(rows) == 20
+    assert all(r["note"] == "" and r["updated_at"] is None for r in rows)
+
+    client.post("/api/admin/notes", json={"team_id": 1, "note": "Written."}, headers=_AUTH)
+    rows = client.get("/api/admin/notes", headers=_AUTH).json()
+    assert len(rows) == 20
+    written = [r for r in rows if r["note"]]
+    assert len(written) == 1 and written[0]["updated_at"] is not None
+
+
+def test_top_is_ordered_by_ep_next4(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    rows = client_for(golden_sf).get("/api/admin/top?n=20", headers=_AUTH).json()
+    assert len(rows) == 20
+    assert [r["ep_next4"] for r in rows] == sorted((r["ep_next4"] for r in rows), reverse=True)
+    assert all(r["position"] in {"GK", "DEF", "MID", "FWD"} for r in rows)
+    assert all(r["team_short"] != "?" for r in rows)
+
+
+def test_fixtures_endpoint_matches_the_shared_swing_util(golden_sf, client_for, monkeypatch):
+    """The admin swing must be the util's swing — not a second implementation."""
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    from graph.data import load_fixtures, resolve_ep_anchor
+    from graph.fixtures_util import swing_score, team_next_fixtures
+
+    body = client_for(golden_sf).get("/api/admin/fixtures/ars?n=6", headers=_AUTH).json()
+    assert body["team_short"] == "ARS"          # lookup is case-insensitive
+    assert len(body["fixtures"]) <= 6
+
+    with golden_sf() as s:
+        expected = team_next_fixtures(load_fixtures(s), body["team_id"],
+                                      resolve_ep_anchor(s), 6)
+    assert body["swing"] == swing_score(expected)
+    assert [f["fdr"] for f in body["fixtures"]] == [r[3] for r in expected]
+
+
+def test_fixtures_endpoint_404s_on_an_unknown_club(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    r = client_for(golden_sf).get("/api/admin/fixtures/ZZZ", headers=_AUTH)
+    assert r.status_code == 404 and r.json()["detail"]["error"] == "unknown_team"
+
+
+def test_every_served_timestamp_carries_a_utc_offset(golden_sf, client_for, monkeypatch):
+    """Naive ISO strings are parsed as LOCAL time by `new Date()` in the browser.
+
+    SQLite hands back naive datetimes, so serializing them raw shifted every
+    rendered timestamp by the viewer's UTC offset — an 8-hour-old sync that was
+    two hours old (2026-07-30). Assert the offset is present at the boundary.
+    """
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    client.post("/api/admin/notes", json={"team_id": 1, "note": "n."}, headers=_AUTH)
+    client.post("/api/admin/euro-weeks",
+                json={"team_id": 1, "gameweek": 5, "competition": "UCL",
+                      "tie_importance": 2}, headers=_AUTH)
+
+    stamps = []
+    o = client.get("/api/admin/overview", headers=_AUTH).json()
+    stamps += [o["last_sync"], o["next_deadline"]]
+    stamps += [r["updated_at"] for r in client.get("/api/admin/notes",
+                                                   headers=_AUTH).json() if r["updated_at"]]
+    stamps += [r["updated_at"] for r in client.get("/api/admin/euro-weeks",
+                                                   headers=_AUTH).json()]
+    h = client.get("/api/health").json()
+    stamps += [h["last_sync"], h["next_deadline"]]
+
+    assert stamps and all(s is not None for s in stamps)
+    for s in stamps:
+        parsed = datetime.fromisoformat(s)
+        assert parsed.tzinfo is not None, f"naive timestamp served: {s}"
+        assert parsed.utcoffset().total_seconds() == 0, f"not UTC: {s}"
+
+
+def test_admin_is_never_linked_from_a_public_page():
+    """/admin is operator-only. A link from any public route leaks its existence."""
+    from pathlib import Path as _Path
+
+    web = _Path(__file__).parents[1] / "web"
+    public = [p for p in web.glob("app/**/*.tsx") if "app\\admin" not in str(p)
+              and "app/admin" not in str(p).replace("\\", "/")]
+    public += [p for p in web.glob("components/*.tsx") if "Admin" not in p.name]
+    offenders = [str(p) for p in public if "/admin" in p.read_text(encoding="utf-8")]
+    assert offenders == [], f"public files link to /admin: {offenders}"
+
+
 def test_the_club_cap_is_one_shared_constant():
     """MarketScout, the API validator and the frontend must not disagree."""
     import importlib

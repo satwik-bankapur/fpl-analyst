@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from fpl.errors import FPLError
 from graph.deps import Deps
 
-from . import mail, service
+from . import admin, mail, service
 from .config import settings
 from .ratelimit import limiter
 from .service import get_deps
@@ -66,6 +66,12 @@ class EuroWeekRequest(BaseModel):
     gameweek: int
     competition: str
     tie_importance: int = Field(ge=1, le=3)
+
+
+class EuroWeekReplace(BaseModel):
+    # The whole grid in one submission. Bounded so a malformed client can't hand
+    # the DB an unbounded rewrite; 20 clubs x 38 GWs is the real ceiling.
+    rows: list[EuroWeekRequest] = Field(max_length=760)
 
 
 def _client_ip(request: Request) -> str:
@@ -182,16 +188,76 @@ def health(deps: Deps = Depends(get_deps)):
 @router.post("/admin/notes")
 def admin_notes(body: NoteRequest, _: None = Depends(_require_admin),
                 deps: Deps = Depends(get_deps)):
-    service.upsert_note(deps, body.team_id, body.note)
-    return {"ok": True}
+    # `changed` is false when the note was already identical — the write was
+    # skipped so the brief cache key stays put (service.upsert_note).
+    return {"ok": True, "changed": service.upsert_note(deps, body.team_id, body.note)}
 
 
 @router.post("/admin/euro-weeks")
 def admin_euro_weeks(body: EuroWeekRequest, _: None = Depends(_require_admin),
                      deps: Deps = Depends(get_deps)):
-    service.upsert_euro_week(deps, body.team_id, body.gameweek,
-                             body.competition, body.tie_importance)
-    return {"ok": True}
+    changed = service.upsert_euro_week(deps, body.team_id, body.gameweek,
+                                       body.competition, body.tie_importance)
+    return {"ok": True, "changed": changed}
+
+
+@router.post("/admin/euro-weeks/replace")
+def admin_euro_weeks_replace(body: EuroWeekReplace, _: None = Depends(_require_admin),
+                             deps: Deps = Depends(get_deps)):
+    """Whole-grid save for the admin editor: upsert what's sent, delete what isn't.
+
+    POST rather than PUT deliberately — `api.main` allows only GET and POST
+    cross-origin, and a verb that needs a CORS change is a worse trade than a
+    slightly unRESTful path.
+    """
+    rows = [r.model_dump() for r in body.rows]
+    if len({(r["team_id"], r["gameweek"]) for r in rows}) != len(rows):
+        # Two rows for the same club+GW: one would silently overwrite the other.
+        raise HTTPException(status_code=400,
+                            detail={"error": "duplicate_team_gameweek"})
+    return {"ok": True, "changed": service.replace_euro_weeks(deps, rows)}
+
+
+# --- admin read surface (the /admin console) --------------------------------
+#
+# Read-only, token-gated, and never linked from a public page. Queries live in
+# `api.admin`; these handlers only shape HTTP.
+
+@router.get("/admin/overview")
+def admin_overview(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    return admin.overview(deps)
+
+
+@router.get("/admin/notes")
+def admin_notes_list(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    return admin.notes(deps)
+
+
+@router.get("/admin/euro-weeks")
+def admin_euro_weeks_list(_: None = Depends(_require_admin),
+                          deps: Deps = Depends(get_deps)):
+    return admin.euro_weeks(deps)
+
+
+@router.get("/admin/players")
+def admin_players(q: str = "", flagged: bool = False,
+                  _: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    return admin.players(deps, q=q, flagged=flagged)
+
+
+@router.get("/admin/fixtures/{team_short}")
+def admin_fixtures(team_short: str, n: int = 6,
+                   _: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    got = admin.team_fixtures(deps, team_short, max(1, min(n, 38)))
+    if got is None:
+        raise HTTPException(status_code=404, detail={"error": "unknown_team"})
+    return got
+
+
+@router.get("/admin/top")
+def admin_top(n: int = 20, _: None = Depends(_require_admin),
+              deps: Deps = Depends(get_deps)):
+    return admin.top(deps, max(1, min(n, 200)))
 
 
 @router.post("/admin/sync")
