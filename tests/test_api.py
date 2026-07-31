@@ -572,7 +572,28 @@ ADMIN_GETS = [
     "/api/admin/players?q=sa&flagged=true",
     "/api/admin/fixtures/ARS",
     "/api/admin/top",
+    "/api/admin/flag-queue",
+    "/api/admin/inspect/briefs",
 ]
+
+# Inspector routes that take an id. Split out because the authorized call answers
+# 404 (nothing with that id) rather than 200 — the point here is that the token
+# gate fires BEFORE the lookup, so an anonymous caller cannot probe for which
+# draft ids exist.
+ADMIN_GETS_NOT_FOUND = [
+    "/api/admin/inspect/draft/00000000-0000-0000-0000-000000000000",
+    "/api/admin/inspect/team/999999/1",
+    "/api/admin/inspect/player/99999999",
+]
+
+
+@pytest.mark.parametrize("path", ADMIN_GETS_NOT_FOUND)
+def test_admin_inspect_by_id_gates_before_lookup(golden_sf, client_for, monkeypatch, path):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get(path, headers=_AUTH).status_code == 404
 
 ADMIN_POSTS = [
     ("/api/admin/notes", {"team_id": 1, "note": "x"}),

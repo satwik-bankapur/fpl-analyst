@@ -463,15 +463,71 @@ greps every public `app/**` and `components/*` file and fails if a link appears.
 
 | Page | What it's for |
 |---|---|
-| `/admin` | Post-sync sanity check: mode, sync freshness, row counts, archive-by-season, `match_method` spread, top 20 by `ep_next4`, and every player carrying an honesty flag. Zeroes, an empty archive and a `match_method` that has collapsed onto `none` render red — the missed-rollover signature (above) is meant to be visible without reading carefully. |
-| `/admin/notes` | Twenty cards, one per club. Empty notes show a manager / penalties / set-pieces / rotation / shape / watch skeleton as **placeholder** text — never pre-filled content, since a note that exists but was never written would be handed to the writer as fact. Per-card Save with an unsaved-changes indicator. |
+| `/admin` | Post-sync sanity check: mode, sync freshness, row counts, archive-by-season, `match_method` spread, top 20 by `ep_next4`, and the flagged-player **triage queue** (below). Zeroes, an empty archive and a `match_method` that has collapsed onto `none` render red — the missed-rollover signature (above) is meant to be visible without reading carefully. |
+| `/admin/notes` | Twenty cards, one per club. Empty notes show a manager / penalties / set-pieces / rotation / shape / watch skeleton as **placeholder** text — never pre-filled content, since a note that exists but was never written would be handed to the writer as fact. Per-card Save with an unsaved-changes indicator. Each card carries `id="club-<team_id>"` so the triage queue can link straight to it. |
 | `/admin/euro-weeks` | Editable grid (club, GW, competition, importance) with add/remove, saved in one submission via `POST /api/admin/euro-weeks/replace` — upsert what's sent, delete what isn't. |
 | `/admin/fixtures` | Club picker → next 6 with FDR colour-coding and the swing, computed by `graph.fixtures_util.swing_score` — the same function that raises a `fixture_cliff` problem, never a second implementation. |
+| `/admin/inspect` | The **reasoning inspector** (below): the pipeline's working for one brief, the exact LLM payload it would send, and free-vs-paid side by side. |
 
-**Read endpoints** (all `GET`, all Bearer-gated, all in `api/admin.py`, which never writes):
-`/api/admin/overview`, `/notes`, `/euro-weeks`, `/players?q=&flagged=`,
-`/fixtures/{team_short}?n=`, `/top?n=`. `overview` also returns the 20-club list, so the
-picker and the grid don't need a second round trip.
+**Read endpoints** (all `GET`, all Bearer-gated, all in `api/admin.py` / `api/inspect.py`,
+neither of which writes): `/api/admin/overview`, `/notes`, `/euro-weeks`,
+`/players?q=&flagged=`, `/fixtures/{team_short}?n=`, `/top?n=`, `/flag-queue`,
+`/inspect/briefs?n=`, `/inspect/draft/{draft_id}`, `/inspect/team/{team_id}/{gw}`,
+`/inspect/player/{player_id}`. `overview` also returns the 20-club list, so the picker and
+the grid don't need a second round trip.
+
+##### The flagged-player triage queue (added 2026-07-31)
+
+The dashboard's flagged list used to be a flat table of ~260 players sorted by EP. True, and
+useless on a Sunday: it answered "which players are flagged" when the question that spends an
+hour well is "which club should I write a note about next". `api.admin.flag_queue` now groups by
+flag, states in plain English whether each flag is **actionable / transient / a known
+limitation**, and for the two a note actually fixes (`no_history_fallback`,
+`thin_minutes_sample`) ranks clubs by `count × highest ep_next4` — unwritten notes first, each
+row linking to `/admin/notes#club-<id>`. Clubs already covered sink down the list, so the queue
+shrinks as it is worked.
+
+A club whose scored players share very few distinct `ep_next4` values gets a **near-identical
+EP** badge: the signature of a club scored entirely on baselines rather than its own data. It is
+measured as a RATIO, not literal equality — the first implementation tested for equality and
+would have never fired. On the 2025-26 data the three promoted clubs sit at 10–12 distinct
+values across ~29 players (~0.4) and every established club at 26–33 of 29–36 (~0.9). Badged:
+IPS, HUL, COV, and nothing else.
+
+##### The reasoning inspector, `/admin/inspect` (added 2026-07-31)
+
+Read-only, token-gated, **zero LLM spend**. Four things the serving path throws away:
+
+1. **The trace.** `RequestCtx.trace` (default `False`) makes each node append a `TraceStage` —
+   see `graph/trace.py`. Rendered as collapsible stages in pipeline order. MarketScout's is the
+   one that did not exist before: it retains every REJECTED candidate with the filter that
+   removed them (`already_in_squad`, `wrong_position`, `unavailable_status`, `over_budget`,
+   `club_cap`, `below_top_n`, `insufficient_ep_delta`), counted and exampled. Strategist's
+   records why each alternative lost, with the margin.
+2. **The components blob.** Click any squad row for its full `ep_scores.components` — minutes
+   basis, base/attack inputs, the per-fixture breakdown with FDR and CS, flags, and the raw
+   JSON. That blob IS the engine's reasoning; reading it should not require SQL.
+3. **The LLM payload.** The exact string `writer/serializer.py` would hand the model, verbatim
+   and copy-pasteable, with the token estimate, which evidence blocks the budget rule kept vs
+   dropped, and the cost at the configured model's rate (output priced at the generation cap).
+   **No model is called** — `tests/test_trace.py` breaks `AnthropicWriter.generate` to prove it.
+4. **Free vs paid.** The same brief through `gate_sections` twice, rendered through the real
+   `BriefView` — so it doubles as a standing check that the Stage B paywall gates correctly
+   before `PAYWALL_ENABLED` ever flips.
+
+**Tracing must never change a brief.** `tests/test_trace.py::test_trace_off_leaves_the_run_untouched`
+asserts a traced run and a normal run produce identical `brief_md`, `decisions`, `market`,
+`diagnosis` and `warnings`, and that a normal run's `trace` is `[]`. If that ever fails, the
+inspector is describing a different pipeline than the one users get and is worse than useless.
+
+The inspector calls `run_brief` directly, not `graph.cache.get_or_generate` — so it writes no
+`briefs` row and never pollutes the cache. It reports whether the persisted row still matches
+what the code produces, alongside the writer version that wrote it: a mismatch where the
+versions DIFFER is an orphaned row (expected after a `STUB_MODEL` bump), a mismatch where they
+are the SAME means cached readers are being served prose the template no longer produces.
+
+Stage A has no FPL client, so a `team_id` cannot be re-traced. That path serves the persisted
+brief for the free/paid comparison and says so, rather than faking a trace.
 
 ##### An unchanged save must not bump `updated_at` — the rule this UI is built around
 

@@ -21,8 +21,10 @@ complete; Stage B (payments) is not started.
 - `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`), `config_version` v1.4.
 - `graph/` — Layer 3: real LangGraph `StateGraph`, 5 deterministic nodes + a **template stub Writer**. Owns `graph/sections.py`, the canonical section vocabulary.
 - `writer/` — Layer 4: LLM writer, §7 validator, payload serializer, generic preview renderer. **Built and tested, but NOT in the serving path** — see below.
-- `api/` — Layer 5 Stage A: FastAPI, 12 routes. No checkout, webhooks, sends, or paywall.
-- `web/` — Layer 5 Stage A: Next.js frontend, 6 routes, re-skinned to the Scout Report design.
+- `api/` — Layer 5 Stage A: FastAPI, 23 routes (12 public + the token-gated `/api/admin/*`
+  operator surface). No checkout, webhooks, sends, or paywall.
+- `web/` — Layer 5 Stage A: Next.js frontend, 10 routes (5 public, re-skinned to the Scout
+  Report design; 5 under `/admin`, token-gated and `noindex`).
 
 ### Current serving reality (read before you promise anything)
 
@@ -40,6 +42,11 @@ The gap between what this repo *looks* like it does and what it does:
   retry/validate/fallback ladder are complete and unit-tested, but no route calls them.
   This is a pause point pending prompt iteration (layer4 §8), not a bug — but do not
   describe the product as LLM-written until that wiring lands.
+  **`/admin/inspect` renders the exact payload the writer would receive**, verbatim and
+  costed, without calling a model — so prompt iteration can start against real payloads at
+  zero spend. It also traces the pipeline's reasoning and diffs free vs paid; see
+  `graph/trace.py`, `api/inspect.py` and `docs/STATUS.md` §6. Trace mode is off by default
+  and must never change a brief (`tests/test_trace.py`).
 - **No payments exist.** No checkout route, no webhook route, no `subscriptions` or
   `webhook_events` tables, no Paddle account, no `PAYWALL_ENABLED`.
 - **The paywall mechanism exists and is proven fail-closed**, but is switched off:

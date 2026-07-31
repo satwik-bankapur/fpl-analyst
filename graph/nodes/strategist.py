@@ -11,9 +11,10 @@ from ..config import (
     CAPTAIN_DIFF_EP_GAP, CAPTAIN_DIFF_MAX_OWNERSHIP, DOUBLE_GW_CHIP_STARTERS,
     TRANSFER_MIN_DELTA, WATCHLIST_N,
 )
-from ..data import load_ep_map, load_players, resolve_ep_anchor
+from ..data import load_ep_map, load_players, load_teams, resolve_ep_anchor
 from ..deps import Deps
 from ..state import BriefState, CaptainDecision, Decisions, TransferDecision
+from ..trace import TraceStage, explain_codes
 
 
 def strategist(state: BriefState, deps: Deps) -> dict:
@@ -36,9 +37,23 @@ def strategist(state: BriefState, deps: Deps) -> dict:
     # --- transfer: highest-severity problem with a >=+2.0 ep_next4 replacement
     rs_by_prob = {rs.problem_player_id: rs for rs in market.replacements}
     transfer = TransferDecision(action="roll", reasoning_codes=["no_qualifying_delta"])
-    for prob in sorted(diag.problems, key=lambda p: p.severity, reverse=True):
+    # Why each problem was NOT the one transferred. Built as the loop runs rather
+    # than reconstructed afterwards, so it records the real control flow —
+    # including the problems never reached because an earlier one won.
+    considered: list[dict] = []
+    ranked_problems = sorted(diag.problems, key=lambda p: p.severity, reverse=True)
+    decided = False
+    for prob in ranked_problems:
         rs = rs_by_prob.get(prob.player_id)
+        if decided:
+            considered.append({"player_id": prob.player_id, "type": prob.type,
+                               "severity": prob.severity, "outcome": "not_reached",
+                               "best_delta": None})
+            continue
         if not rs or not rs.candidates:
+            considered.append({"player_id": prob.player_id, "type": prob.type,
+                               "severity": prob.severity, "outcome": "no_candidates",
+                               "best_delta": None})
             continue
         best = rs.candidates[0]                     # candidates are ep_next4-desc
         if best.ep_next4_delta >= TRANSFER_MIN_DELTA:
@@ -47,7 +62,16 @@ def strategist(state: BriefState, deps: Deps) -> dict:
             transfer = TransferDecision(action="make", out_id=prob.player_id,
                                         in_id=best.player_id, reasoning_codes=codes)
             reasoning.extend(codes)
-            break
+            considered.append({"player_id": prob.player_id, "type": prob.type,
+                               "severity": prob.severity, "outcome": "chosen",
+                               "best_delta": best.ep_next4_delta,
+                               "in_id": best.player_id})
+            decided = True
+            continue
+        considered.append({"player_id": prob.player_id, "type": prob.type,
+                           "severity": prob.severity, "outcome": "below_threshold",
+                           "best_delta": best.ep_next4_delta,
+                           "in_id": best.player_id})
     if transfer.action == "roll":
         reasoning.append("transfer:roll")
 
@@ -104,4 +128,103 @@ def strategist(state: BriefState, deps: Deps) -> dict:
     decisions = Decisions(
         transfer=transfer, captain=captain, bench_order=bench_order,
         chip_stance=chip_stance, watchlist=watch, reasoning_codes=reasoning)
-    return {"decisions": decisions}
+    out = {"decisions": decisions}
+    if state.request.trace:
+        with deps.session_factory() as session:
+            teams = load_teams(session)
+        out["trace"] = [_trace(decisions, considered, ranked, gap, dbl,
+                               players, teams, ep, ep4, own)]
+    return out
+
+
+# --- trace (diagnostic only; see graph/trace.py) ---------------------------
+
+def _trace(dec, considered, ranked_starters, captain_gap, dbl_count,
+           players, teams, ep, ep4, own) -> TraceStage:
+    """The decision plus the alternatives that lost, with the margins they lost by."""
+    def name(pid):
+        return players.get(pid, {}).get("web_name", f"#{pid}")
+
+    def club(pid):
+        return teams.get(players.get(pid, {}).get("team_id"), {}).get("short_name", "?")
+
+    def who(pid):
+        return {"player_id": pid, "name": name(pid), "club": club(pid)}
+
+    t = dec.transfer
+    alternatives = [
+        {**a, "name": name(a["player_id"]),
+         "in_name": name(a["in_id"]) if a.get("in_id") else None,
+         "threshold": TRANSFER_MIN_DELTA,
+         "why": _WHY_LOST[a["outcome"]](a, TRANSFER_MIN_DELTA)}
+        for a in considered
+    ]
+
+    starters = [{**who(pid), "ep": round(ep(pid), 2), "ep_next4": round(ep4(pid), 2),
+                 "ownership_pct": own(pid)} for pid in ranked_starters]
+
+    summary = []
+    if t.action == "make":
+        summary.append(
+            f"Transfer: {name(t.out_id)} out, {name(t.in_id)} in — the highest-severity "
+            f"problem whose best replacement cleared the +{TRANSFER_MIN_DELTA} "
+            f"projected-points threshold.")
+    else:
+        best = max((a["best_delta"] for a in considered
+                    if a["best_delta"] is not None), default=None)
+        summary.append(
+            f"Transfer: rolled. Best available delta "
+            f"{'+' + str(best) if best is not None else 'none'}, "
+            f"threshold is {TRANSFER_MIN_DELTA}.")
+    summary += [f"  {a['name']}: {a['why']}" for a in alternatives]
+
+    if starters:
+        cap, vice = starters[0], (starters[1] if len(starters) > 1 else starters[0])
+        summary.append(
+            f"Captain: {cap['name']} — highest anchor-gameweek projection among the "
+            f"starting XI, {round(cap['ep'] - vice['ep'], 2)} clear of "
+            f"{vice['name']} at vice.")
+    if dec.captain.differential_note:
+        summary.append(f"  Vice flagged as a differential: {dec.captain.differential_note}.")
+    summary.append(
+        f"Chips: {dec.chip_stance} — {dbl_count} squad player(s) carry a double-gameweek flag.")
+    summary.append("Bench order: " + (" -> ".join(name(p) for p in dec.bench_order) or "none"))
+    summary.append("Watchlist: " + (", ".join(name(p) for p in dec.watchlist) or "none"))
+
+    return TraceStage(node="strategist", summary=summary, data={
+        "transfer": {
+            "action": t.action,
+            "out": who(t.out_id) if t.out_id else None,
+            "in": who(t.in_id) if t.in_id else None,
+            "threshold": TRANSFER_MIN_DELTA,
+        },
+        "transfer_alternatives": alternatives,
+        "captain": {
+            "pick": who(dec.captain.pick_id),
+            "vice": who(dec.captain.vice_id),
+            "gap": captain_gap,
+            "differential_note": dec.captain.differential_note,
+            "differential_gap_threshold": CAPTAIN_DIFF_EP_GAP,
+            "differential_max_ownership": CAPTAIN_DIFF_MAX_OWNERSHIP,
+        },
+        "ranked_starters": starters,
+        "bench_order": [who(p) for p in dec.bench_order],
+        "chip": {"stance": dec.chip_stance, "double_gw_players": dbl_count,
+                 "threshold": DOUBLE_GW_CHIP_STARTERS},
+        "watchlist": [{**who(p), "ep_next4": round(ep4(p), 2), "ownership_pct": own(p)}
+                      for p in dec.watchlist],
+        "codes": explain_codes(dec.reasoning_codes),
+    })
+
+
+_WHY_LOST = {
+    "chosen": lambda a, thr: (
+        f"chosen — best replacement gains +{a['best_delta']}, clearing the "
+        f"+{thr} threshold"),
+    "below_threshold": lambda a, thr: (
+        f"best replacement gains only +{a['best_delta']}, threshold is +{thr}"),
+    "no_candidates": lambda a, thr: (
+        "no legal replacement existed at this budget, position and club cap"),
+    "not_reached": lambda a, thr: (
+        "a higher-severity problem was already solved, and v1 never makes two transfers"),
+}

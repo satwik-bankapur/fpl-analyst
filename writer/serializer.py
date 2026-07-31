@@ -27,6 +27,12 @@ class PayloadResult:
     text: str
     token_estimate: int
     dropped: list[str] = field(default_factory=list)
+    # Per-block inventory for the /admin/inspect payload preview: which evidence
+    # and fixture blocks the budget rule kept and which it dropped, by name.
+    # Additive and defaulted — `dropped` remains the field the writer branches on;
+    # nothing in the LLM path reads this. It exists because "dropped:
+    # ['bench_evidence']" tells an operator a group went, not WHO went with it.
+    blocks: list[dict] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:
@@ -115,12 +121,15 @@ def serialize_payload(state, deps, *, max_tokens: int = PAYLOAD_MAX_TOKENS) -> P
 
     core_evidence = ["", "[EVIDENCE]"]
     bench_evidence = []
+    block_names: list[tuple[str, str]] = []     # (group, label) in emission order
     for pid in sorted(evidence_ids):
         block = evidence_block(pid)
         if slot_of.get(pid, 0) >= 12:           # bench-slot evidence -> droppable first
             bench_evidence.append(block)
+            block_names.append(("bench_evidence", nm(pid)))
         else:
             core_evidence.append(block)
+            block_names.append(("evidence", nm(pid)))
 
     # --- problems --------------------------------------------------------
     problem_lines = ["", "[PROBLEMS]"]
@@ -157,8 +166,12 @@ def serialize_payload(state, deps, *, max_tokens: int = PAYLOAD_MAX_TOKENS) -> P
     for tr in fx.teams:
         if tr.team_id not in squad_teams and tr.team_id not in decision_teams:
             continue
-        (core_fixtures if tr.team_id in decision_teams else nondecision_fixtures).append(
-            fixture_row(tr))
+        if tr.team_id in decision_teams:
+            core_fixtures.append(fixture_row(tr))
+            block_names.append(("fixtures", short(tr.team_id)))
+        else:
+            nondecision_fixtures.append(fixture_row(tr))
+            block_names.append(("nondecision_fixtures", short(tr.team_id)))
     if fx.entering_good_run:
         core_fixtures.append("entering_good_run: "
                              + ", ".join(short(t) for t in fx.entering_good_run))
@@ -196,4 +209,7 @@ def serialize_payload(state, deps, *, max_tokens: int = PAYLOAD_MAX_TOKENS) -> P
         dropped.append("nondecision_fixtures")
         text = assemble(False, False)
 
-    return PayloadResult(text=text, token_estimate=estimate_tokens(text), dropped=dropped)
+    blocks = [{"group": group, "label": label, "included": group not in dropped}
+              for group, label in block_names]
+    return PayloadResult(text=text, token_estimate=estimate_tokens(text),
+                         dropped=dropped, blocks=blocks)

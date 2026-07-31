@@ -218,6 +218,188 @@ def players(deps: Deps, q: str = "", flagged: bool = False, limit: int = 100) ->
     return {"total": len(out), "players": out[:limit]}
 
 
+# --- the flagged-player work queue -----------------------------------------
+#
+# A flat list of flagged players is a fact, not a task. The operator's actual
+# question on a Sunday is "where does an hour of my writing buy the most brief
+# quality", and the answer is a CLUB, because `team_notes` is a per-club table.
+# So this groups by flag, then — for the two flags a note can actually fix — by
+# club, ranked by how much that club's briefs stand to improve.
+
+# Every honesty flag, in plain English, with whether writing something changes it.
+#   actionable       — a team note materially improves the brief
+#   transient        — resolves itself on the next sync; do nothing
+#   known_limitation — the engine has no better input; a note won't fix the number
+_FLAG_MEANINGS = {
+    "no_history_fallback": (
+        "actionable",
+        "No prior-season record for this player, so the projection falls back to what "
+        "players at his price and position typically return.",
+    ),
+    "thin_minutes_sample": (
+        "actionable",
+        "Too few minutes played for a reliable attacking rate, so a positional average "
+        "stands in for the player's own numbers.",
+    ),
+    "promoted_team_fallback": (
+        "known_limitation",
+        "A promoted club with no top-flight record — the projection is discounted from "
+        "the price band. Nothing but a season of data fixes this.",
+    ),
+    "unavailable": (
+        "transient",
+        "Flagged unavailable by the FPL API (injured, suspended, or out on loan). "
+        "Clears on its own when the API updates.",
+    ),
+    "european_fixture_week": (
+        "transient",
+        "A midweek European tie is dampening expected minutes for this gameweek only.",
+    ),
+}
+
+_UNKNOWN_MEANING = (
+    "known_limitation",
+    "No explanation registered for this flag — add one to `_FLAG_MEANINGS` in api/admin.py.",
+)
+
+# The two flags a team note demonstrably improves. Only these get the club
+# ranking; ranking clubs by a flag a note cannot fix would send the operator to
+# write words that change nothing.
+NOTE_IMPROVABLE = ("no_history_fallback", "thin_minutes_sample")
+
+# "Identical EP across a whole club" — measured as COLLAPSE, not literal equality.
+#
+# Literal equality is the wrong test and was the first thing tried here. A club
+# scored entirely on baselines still gets distinct numbers, because the baseline
+# is a function of price band and position and those differ across a squad. On the
+# 2025-26 data the promoted clubs land at 10-12 distinct ep_next4 values across
+# ~29 scored players (ratio ~0.4) while every established club sits at 26-33 of
+# 29-36 (ratio ~0.9). So the signal is the RATIO, and a strict-equality rule would
+# have quietly never fired.
+IDENTICAL_EP_MIN_PLAYERS = 5
+IDENTICAL_EP_MAX_DISTINCT_RATIO = 0.5
+
+
+def _bare(flag: str) -> str:
+    """`unavailable:i` -> `unavailable`. Flags carry a suffix; groups do not."""
+    return flag.split(":", 1)[0]
+
+
+def flag_queue(deps: Deps) -> dict:
+    """Flagged players as a triage queue: by flag, then by club, ranked by payoff."""
+    with deps.session_factory() as session:
+        teams = load_teams(session)
+        anchor = resolve_ep_anchor(session)
+        notes = {
+            n.team_id: n for n in session.scalars(select(TeamNote)) if (n.note or "").strip()
+        }
+        players = {p.id: p for p in session.scalars(select(Player))}
+        rows = (
+            session.scalars(select(EpScore).where(EpScore.gameweek == anchor)).all()
+            if anchor is not None else []
+        )
+
+    # club -> (how many scored players, how many DISTINCT ep_next4 values among
+    # them). Computed over the whole club, not just the flagged ones: the pattern
+    # being detected is "this club was scored on baselines", which flagged-only
+    # rows cannot show.
+    club_stats: dict[int, dict] = {}
+    for r in rows:
+        p = players.get(r.player_id)
+        if p is None:
+            continue
+        st = club_stats.setdefault(p.team_id, {"scored": 0, "eps": set()})
+        st["scored"] += 1
+        st["eps"].add(round(float(r.ep_next4), 2))
+
+    groups: dict[str, list[dict]] = {}
+    flagged_ids: set[int] = set()
+    for r in rows:
+        p = players.get(r.player_id)
+        if p is None:
+            continue
+        for flag in honesty_flags(r.components):
+            flagged_ids.add(p.id)
+            groups.setdefault(_bare(flag), []).append({
+                "id": p.id,
+                "web_name": p.web_name,
+                "team_id": p.team_id,
+                "team_short": teams.get(p.team_id, {}).get("short_name", "?"),
+                "position": _POS.get(p.position, "?"),
+                "price": float(p.price),
+                "news": p.news or "",
+                "ep_next4": float(r.ep_next4),
+                "flag": flag,
+            })
+
+    out_groups = []
+    for name, members in groups.items():
+        kind, explanation = _FLAG_MEANINGS.get(name, _UNKNOWN_MEANING)
+        group = {
+            "flag": name,
+            "kind": kind,
+            "explanation": explanation,
+            "count": len(members),
+            "note_improvable": name in NOTE_IMPROVABLE,
+            "clubs": (_clubs_for(members, teams, notes, club_stats)
+                      if name in NOTE_IMPROVABLE else []),
+            "players": sorted(members, key=lambda m: -m["ep_next4"])[:12],
+        }
+        out_groups.append(group)
+
+    # Actionable first — the queue should open on the work, not on the noise.
+    order = {"actionable": 0, "known_limitation": 1, "transient": 2}
+    out_groups.sort(key=lambda g: (order.get(g["kind"], 3), -g["count"]))
+
+    return {
+        "total_flagged_players": len(flagged_ids),
+        "groups": out_groups,
+        "clubs_total": len(teams),
+        "clubs_with_notes": len(notes),
+    }
+
+
+def _clubs_for(members, teams, notes, club_stats) -> list[dict]:
+    """Clubs ranked by (count x highest ep_next4) — the note-writing payoff order.
+
+    The product, not either factor alone: twelve flagged fringe players matter less
+    than three flagged players who are actually going to be picked, and one flagged
+    fringe name matters less than a whole club scored on baselines.
+    """
+    by_club: dict[int, list[dict]] = {}
+    for m in members:
+        by_club.setdefault(m["team_id"], []).append(m)
+
+    out = []
+    for tid, rows in by_club.items():
+        top = max(r["ep_next4"] for r in rows)
+        stats = club_stats.get(tid, {"scored": 0, "eps": set()})
+        distinct = len(stats["eps"])
+        out.append({
+            "team_id": tid,
+            "team_short": teams.get(tid, {}).get("short_name", "?"),
+            "team_name": teams.get(tid, {}).get("name", "?"),
+            "count": len(rows),
+            "top_ep_next4": round(top, 2),
+            "score": round(len(rows) * top, 1),
+            "has_note": tid in notes,
+            "is_sample": bool(notes[tid].is_sample) if tid in notes else False,
+            # The badge: a whole club sharing one or two EP values is a club nobody
+            # has data for. The counts are published alongside the boolean so the
+            # operator can see the evidence, not just the verdict.
+            "scored_players": stats["scored"],
+            "distinct_ep_next4": distinct,
+            "identical_ep": (
+                stats["scored"] >= IDENTICAL_EP_MIN_PLAYERS
+                and distinct <= stats["scored"] * IDENTICAL_EP_MAX_DISTINCT_RATIO
+            ),
+            "players": sorted(rows, key=lambda r: -r["ep_next4"])[:8],
+        })
+    # Unwritten notes first within the ranking: a club already covered is done work.
+    out.sort(key=lambda c: (c["has_note"], -c["score"]))
+    return out
+
+
 # --- fixtures --------------------------------------------------------------
 
 def team_fixtures(deps: Deps, team_short: str, n: int = 6) -> dict | None:

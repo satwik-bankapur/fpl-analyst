@@ -17,6 +17,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from .trace import TraceStage
+
 Mode = Literal["IN_SEASON", "PRESEASON"]
 ProblemType = Literal[
     "unavailable", "injury_doubt", "fixture_cliff",
@@ -33,6 +35,11 @@ class RequestCtx(BaseModel):
     draft_id: Optional[UUID] = None
     gameweek_anchor: int = 0               # 0 for pre-season briefs (§1)
     requested_at: datetime
+    # Diagnostic only (the /admin/inspect console). False everywhere else, and
+    # nothing downstream of a node may branch on it: a traced run must produce the
+    # same brief as an untraced one, or the trace is describing a different
+    # pipeline than the one that serves users. See graph/trace.py.
+    trace: bool = False
 
 
 # --- SquadAnalyst outputs (§2.1) -------------------------------------------
@@ -172,3 +179,7 @@ class BriefState(BaseModel):
     # `operator.add` reducer: nodes append warnings; LangGraph concatenates them.
     warnings: Annotated[list[str], operator.add] = Field(default_factory=list)
     error: Optional[PipelineError] = None
+    # Same append-reducer as `warnings`, and empty unless `request.trace` is set.
+    # It is NOT part of the §2 handoff contract — no node reads it, the writer
+    # never sees it, and it is excluded from the brief. See graph/trace.py.
+    trace: Annotated[list[TraceStage], operator.add] = Field(default_factory=list)
