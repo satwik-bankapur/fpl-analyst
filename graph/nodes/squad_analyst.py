@@ -21,6 +21,7 @@ from ..fixtures_util import DEFAULT_HORIZON, swing_score, team_next_fixtures
 from ..state import (
     BriefState, Diagnosis, Pick, PipelineError, Problem, SquadCtx,
 )
+from ..trace import TraceStage
 
 
 def _f(x) -> float:
@@ -187,7 +188,61 @@ def squad_analyst(state: BriefState, deps: Deps) -> dict:
         diagnosis, warnings = _diagnose(
             squad, ep_map, players, teams, fixtures, anchor, req.mode)
 
-    return {"squad": squad, "diagnosis": diagnosis, "warnings": warnings}
+    out = {"squad": squad, "diagnosis": diagnosis, "warnings": warnings}
+    if req.trace:
+        out["trace"] = [_trace(squad, diagnosis, warnings, ep_map, players, teams)]
+    return out
+
+
+# --- trace (diagnostic only; see graph/trace.py) ---------------------------
+
+def _trace(squad, diag, warnings, ep_map, players, teams) -> TraceStage:
+    """What the analyst saw and what it called a problem. Reads state, changes none."""
+    def row(pk):
+        pl = players.get(pk.player_id, {})
+        return {
+            "player_id": pk.player_id,
+            "name": pl.get("web_name", f"#{pk.player_id}"),
+            "club": teams.get(pl.get("team_id"), {}).get("short_name", "?"),
+            "position": {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(pl.get("position"), "?"),
+            "price": pl.get("price", 0.0),
+            "slot": pk.slot,
+            "ep": round(ep_map.get(pk.player_id, {}).get("ep", 0.0), 2),
+            "ep_next4": round(ep_map.get(pk.player_id, {}).get("ep_next4", 0.0), 2),
+            "is_captain": pk.is_captain,
+            "multiplier": pk.multiplier,
+            "flags": list((ep_map.get(pk.player_id, {}).get("components") or {}).get("flags", [])),
+        }
+
+    picks = sorted(squad.picks, key=lambda p: p.slot)
+    problems = [
+        {
+            "type": p.type,
+            "player_id": p.player_id,
+            "name": players.get(p.player_id, {}).get("web_name", "squad-level")
+                    if p.player_id else "squad-level",
+            "severity": p.severity,
+            "evidence": list(p.evidence),
+        }
+        for p in diag.problems
+    ]
+    summary = [
+        f"Starting XI projects {diag.squad_ep_gw} points this gameweek "
+        f"and {diag.squad_ep_next4} over the next four (captain doubled).",
+        f"{len(problems)} problem(s) raised across 15 picks.",
+    ]
+    summary += [f"{p['type']} (severity {p['severity']}) — {p['name']}: {'; '.join(p['evidence'])}"
+                for p in problems]
+    return TraceStage(node="squad_analyst", summary=summary, data={
+        "squad_ep_gw": diag.squad_ep_gw,
+        "squad_ep_next4": diag.squad_ep_next4,
+        "free_transfers": diag.free_transfers,
+        "captain_current": diag.captain_current,
+        "xi": [row(pk) for pk in picks if pk.slot <= 11],
+        "bench": [row(pk) for pk in picks if pk.slot >= 12],
+        "problems": problems,
+        "warnings": list(warnings),
+    })
 
 
 def _fatal(code: str, message: str) -> dict:

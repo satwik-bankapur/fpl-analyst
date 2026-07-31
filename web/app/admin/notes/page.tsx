@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Failed, Loading, PageTitle, useLoad, timeAgo } from "@/components/AdminBits";
 import { adminGet, adminPost, NoteRow, SaveResult } from "@/lib/admin";
 
@@ -26,6 +26,19 @@ export default function AdminNotes() {
   const [saving, setSaving] = useState<number | null>(null);
   const [saved, setSaved] = useState<Record<number, string>>({});
   const [failed, setFailed] = useState<Record<number, string>>({});
+
+  // Scroll to #club-<id> once the cards exist.
+  //
+  // The browser resolves a URL hash on load, but this page fetches its rows
+  // client-side, so at that moment the document is still the loading state and
+  // there is nothing to scroll to. Without this the dashboard's "write note →"
+  // link lands at the top of a 20-card page — technically the right page,
+  // useless as a jump. Runs on `data` because that is when the target appears.
+  useEffect(() => {
+    if (!data) return;
+    const id = window.location.hash.slice(1);
+    if (id) document.getElementById(id)?.scrollIntoView({ block: "start" });
+  }, [data]);
 
   if (error) return <Failed error={error} onRetry={reload} />;
   if (loading || !data) return <Loading what="team notes" />;
@@ -74,7 +87,14 @@ export default function AdminNotes() {
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {data.map((r) => (
-          <section key={r.team_id} className="card flex flex-col p-4">
+          // `id` is the link target the dashboard's flag queue jumps to
+          // (/admin/notes#club-<team_id>) — scroll-mt keeps the card clear of the
+          // sticky header when it lands.
+          <section
+            key={r.team_id}
+            id={`club-${r.team_id}`}
+            className="card flex scroll-mt-24 flex-col p-4"
+          >
             <div className="mb-2 flex items-baseline justify-between gap-2">
               <h2 className="m-0 text-title font-semibold">{r.team_short}</h2>
               <span className="text-eyebrow uppercase text-ink-700">

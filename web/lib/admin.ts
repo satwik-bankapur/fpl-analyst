@@ -136,3 +136,147 @@ export type FixtureRun = {
 
 /** Saves report whether they actually wrote — an unchanged save is a no-op by design. */
 export type SaveResult = { ok: boolean; changed: boolean | number };
+
+// --- flagged-player work queue (mirrors api/admin.flag_queue) ---------------
+
+export type FlagKind = "actionable" | "transient" | "known_limitation";
+
+export type QueuePlayer = {
+  id: number;
+  web_name: string;
+  team_id: number;
+  team_short: string;
+  position: string;
+  price: number;
+  news: string;
+  ep_next4: number;
+  flag: string;
+};
+
+export type QueueClub = {
+  team_id: number;
+  team_short: string;
+  team_name: string;
+  count: number;
+  top_ep_next4: number;
+  /** count x highest ep_next4 — the note-writing payoff ranking. */
+  score: number;
+  has_note: boolean;
+  is_sample: boolean;
+  scored_players: number;
+  distinct_ep_next4: number;
+  /** The whole club's EP has collapsed onto a handful of baseline values. */
+  identical_ep: boolean;
+  players: QueuePlayer[];
+};
+
+export type FlagGroup = {
+  flag: string;
+  kind: FlagKind;
+  explanation: string;
+  count: number;
+  note_improvable: boolean;
+  clubs: QueueClub[];
+  players: QueuePlayer[];
+};
+
+export type FlagQueue = {
+  total_flagged_players: number;
+  groups: FlagGroup[];
+  clubs_total: number;
+  clubs_with_notes: number;
+};
+
+// --- the reasoning inspector (mirrors api/inspect.py) -----------------------
+
+export type BriefRef = {
+  brief_id: number;
+  draft_id: string | null;
+  fpl_team_id: number | null;
+  gameweek: number;
+  model: string;
+  created_at: string | null;
+  input_hash: string;
+};
+
+/**
+ * One node's working. `data` is deliberately untyped: each stage records a
+ * different shape and it is a DIAGNOSTIC, not a contract — see graph/trace.py.
+ * The inspector page narrows it per node at the point of render.
+ */
+export type TraceStage = {
+  node: string;
+  summary: string[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: Record<string, any>;
+};
+
+export type PayloadPreview = {
+  text: string;
+  token_estimate: number;
+  max_input_tokens: number;
+  over_budget: boolean;
+  dropped: string[];
+  blocks: { group: string; label: string; included: boolean }[];
+  model: string;
+  priced: boolean;
+  rate_per_mtok: { input: number; output: number };
+  output_max_tokens: number;
+  cost_usd: { input: number; output_at_cap: number; total_at_cap: number };
+};
+
+export type InspectSquadRow = {
+  player_id: number;
+  name: string;
+  club: string;
+  position: string;
+  price: number;
+  slot: number;
+  role: "XI" | "BENCH";
+  is_captain: boolean;
+  ep: number;
+  ep_next4: number;
+  flags: string[];
+};
+
+export type Tier = { sections: Record<string, string>; locked_sections: string[] };
+
+export type Inspection = {
+  target: { kind: "draft" | "team"; draft_id?: string; team_id?: number; gameweek: number };
+  error: { code: string; message: string } | null;
+  available: { trace: boolean; payload: boolean; reason: string | null };
+  trace: TraceStage[];
+  warnings: string[];
+  brief_md?: string;
+  squad?: InspectSquadRow[];
+  cache?: {
+    matches: boolean | null;
+    model: string | null;
+    created_at: string | null;
+    current_writer: string;
+    superseded: boolean;
+  } | null;
+  free?: Tier;
+  paid?: Tier;
+  paid_delta?: string[];
+  paid_vocabulary?: string[];
+  payload?: PayloadPreview | null;
+};
+
+export type PlayerComponents = {
+  player_id: number;
+  web_name: string;
+  full_name: string;
+  team_short: string;
+  position: string;
+  price: number;
+  status: string;
+  news: string;
+  chance_of_playing: number | null;
+  ownership_pct: number;
+  gameweek: number | null;
+  ep: number | null;
+  ep_next4: number | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  components: Record<string, any> | null;
+};

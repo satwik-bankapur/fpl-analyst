@@ -2,14 +2,15 @@
 
 import { useCallback } from "react";
 import { FlagChips, Failed, Loading, PageTitle, Panel, Stat, useLoad, timeAgo } from "@/components/AdminBits";
-import { adminGet, Overview, PlayerSearch, TopRow } from "@/lib/admin";
+import FlagQueue from "@/components/AdminFlagQueue";
+import { adminGet, FlagQueue as Queue, Overview, TopRow } from "@/lib/admin";
 
 // The post-sync sanity check. Everything on this page is arranged so a bad sync
 // is visible without reading carefully: a stale last_sync, an empty archive, a
 // match_method spread that has collapsed onto "none", or a top-20 where every
 // row is a goalkeeper (the signature of a missed season rollover — STATUS §6).
 
-type Bundle = { overview: Overview; top: TopRow[]; flagged: PlayerSearch };
+type Bundle = { overview: Overview; top: TopRow[]; flagged: Queue };
 
 const STALE_HOURS = 36; // a daily cron that missed a run
 
@@ -19,7 +20,7 @@ export default function AdminDashboard() {
       const [overview, top, flagged] = await Promise.all([
         adminGet<Overview>("/admin/overview"),
         adminGet<TopRow[]>("/admin/top?n=20"),
-        adminGet<PlayerSearch>("/admin/players?flagged=true"),
+        adminGet<Queue>("/admin/flag-queue"),
       ]);
       return { overview, top, flagged };
     },
@@ -146,46 +147,8 @@ export default function AdminDashboard() {
           </div>
         </Panel>
 
-        <Panel title={`Flagged players — ${flagged.total} carrying an honesty flag`}>
-          {flagged.total === 0 ? (
-            <p className="m-0 text-body text-ink-600">None. Every scored player is on its own data.</p>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-body">
-                  <thead>
-                    <tr className="text-left text-eyebrow uppercase text-ink-700">
-                      <th className="py-1.5 pr-3 font-semibold">Player</th>
-                      <th className="py-1.5 pr-3 font-semibold">Club</th>
-                      <th className="py-1.5 pr-3 text-right font-semibold">ep_next4</th>
-                      <th className="py-1.5 pr-3 font-semibold">Flags</th>
-                      <th className="py-1.5 font-semibold">News</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {flagged.players.map((p) => (
-                      <tr key={p.id} className="border-t border-line-soft align-top">
-                        <td className="py-1.5 pr-3 text-ink-0">{p.web_name}</td>
-                        <td className="py-1.5 pr-3 text-ink-500">{p.team_short}</td>
-                        <td className="py-1.5 pr-3 text-right tabular-nums text-ink-300">
-                          {p.ep_next4?.toFixed(2) ?? "—"}
-                        </td>
-                        <td className="py-1.5 pr-3">
-                          <FlagChips flags={p.flags} />
-                        </td>
-                        <td className="max-w-[28ch] py-1.5 text-ink-600">{p.news}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {flagged.total > flagged.players.length && (
-                <p className="m-0 mt-3 text-label text-ink-700">
-                  Showing the {flagged.players.length} highest-EP of {flagged.total}.
-                </p>
-              )}
-            </>
-          )}
+        <Panel title="Flagged players — triage queue">
+          <FlagQueue queue={flagged} />
         </Panel>
       </div>
     </>

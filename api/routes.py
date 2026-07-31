@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from fpl.errors import FPLError
 from graph.deps import Deps
 
-from . import admin, mail, service
+from . import admin, inspect, mail, service
 from .config import settings
 from .ratelimit import limiter
 from .service import get_deps
@@ -258,6 +258,50 @@ def admin_fixtures(team_short: str, n: int = 6,
 def admin_top(n: int = 20, _: None = Depends(_require_admin),
               deps: Deps = Depends(get_deps)):
     return admin.top(deps, max(1, min(n, 200)))
+
+
+@router.get("/admin/flag-queue")
+def admin_flag_queue(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
+    return admin.flag_queue(deps)
+
+
+# --- the reasoning inspector (/admin/inspect) -------------------------------
+#
+# Read-only and zero-spend: `api.inspect` runs the deterministic graph in trace
+# mode and serializes the Layer 4 payload WITHOUT calling any model. Nothing here
+# writes a row — not even a `briefs` cache entry (see api/inspect.py).
+
+@router.get("/admin/inspect/briefs")
+def admin_inspect_briefs(n: int = 25, _: None = Depends(_require_admin),
+                         deps: Deps = Depends(get_deps)):
+    return inspect.recent_briefs(deps, max(1, min(n, 100)))
+
+
+@router.get("/admin/inspect/player/{player_id}")
+def admin_inspect_player(player_id: int, _: None = Depends(_require_admin),
+                         deps: Deps = Depends(get_deps)):
+    got = inspect.player_components(deps, player_id)
+    if got is None:
+        raise HTTPException(status_code=404, detail={"error": "unknown_player"})
+    return got
+
+
+@router.get("/admin/inspect/draft/{draft_id}")
+def admin_inspect_draft(draft_id: uuid.UUID, _: None = Depends(_require_admin),
+                        deps: Deps = Depends(get_deps)):
+    got = inspect.inspect_draft(deps, draft_id)
+    if got is None:
+        raise HTTPException(status_code=404, detail={"error": "invalid_draft_id"})
+    return got
+
+
+@router.get("/admin/inspect/team/{team_id}/{gw}")
+def admin_inspect_team(team_id: int, gw: int, _: None = Depends(_require_admin),
+                       deps: Deps = Depends(get_deps)):
+    got = inspect.inspect_team(deps, team_id, gw)
+    if got is None:
+        raise HTTPException(status_code=404, detail={"error": "no_persisted_brief"})
+    return got
 
 
 @router.post("/admin/sync")

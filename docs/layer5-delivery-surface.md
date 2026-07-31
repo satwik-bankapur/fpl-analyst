@@ -68,6 +68,36 @@ One-click unsubscribe (required for bulk-sender deliverability). Sets `email_sig
 > Still NOT here, still deliberate: no accounts, no sessions, no login page. `/admin` is
 > the existing operator token behind one prompt — §5's "no auth" rule is intact.
 
+> **DRIFT 2026-07-31 — the admin surface grew a read-only diagnostic wing.**
+>
+> Five more Bearer-gated **GET** routes, none of which write anything:
+> `GET /api/admin/flag-queue`, `/inspect/briefs`, `/inspect/draft/{draft_id}`,
+> `/inspect/team/{team_id}/{gw}`, `/inspect/player/{player_id}`. Queries live in
+> `api/inspect.py`; the `/admin/inspect` page renders them. Full description in
+> `docs/STATUS.md` §6.
+>
+> **Three things about this that constrain future edits:**
+>
+> 1. **It runs the pipeline but writes nothing — not even a cache row.** `inspect_draft`
+>    calls `graph.graph.run_brief` directly rather than `graph.cache.get_or_generate`,
+>    because the latter persists a `briefs` row on a miss. An inspector that mutated the
+>    cache would change the thing it claims to be observing.
+>    `tests/test_trace.py::test_inspect_draft_writes_nothing` pins it.
+> 2. **It never calls the LLM.** The payload preview goes through the real
+>    `writer.serializer` and stops there. `api/inspect.py` imports the serializer and
+>    nothing else from the LLM path; a test breaks `AnthropicWriter.generate` to keep the
+>    page zero-spend as the §8 prompt work begins.
+> 3. **The free/paid comparison is not a mock.** It calls `graph.sections.gate_sections`
+>    with `paywall=True` — the same function and the same allow-list Stage B will use —
+>    and renders both sides through the real `BriefView`. That makes the page a standing
+>    pre-flight check on the paywall: if a section gates wrongly, it is visible here
+>    before `PAYWALL_ENABLED` flips, not after a customer finds it. Do not "simplify" this
+>    into a static section list; the whole value is that it exercises the real gate.
+>
+> Stage A has no FPL client, so the `team_id` path cannot re-run the pipeline for a season
+> squad. It serves the persisted brief for the free/paid view and says why the trace is
+> unavailable, rather than presenting a fabricated one.
+
 ### 1.10 New table: `subscriptions`
 | field | type |
 |---|---|
