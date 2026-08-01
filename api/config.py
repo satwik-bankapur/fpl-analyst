@@ -30,5 +30,26 @@ class ApiSettings(BaseSettings):
     brief_rate_limit: int = 5
     brief_rate_window_s: int = 3600
 
+    # Rate limit: public POST REQUESTS per IP per hour, counted whether or not the
+    # request generates anything. `brief_rate_limit` alone leaves POST /api/brief
+    # able to insert a `draft_squads` row per call forever (the row is written
+    # before the cache is consulted) and leaves POST /api/signup, which sends a
+    # welcome email, with no limit at all. Deliberately well above the generation
+    # cap: this bounds row growth and mail volume, it is not the generation budget.
+    request_rate_limit: int = 30
+    request_rate_window_s: int = 3600
+
+    # Failed /api/admin/* auth attempts per IP before the surface answers 429.
+    # Only FAILURES are recorded, so a working operator never sees it. Generous on
+    # purpose — a 32-byte token does not need a tight lockout, and locking the
+    # operator out of their own dashboard is the more likely failure.
+    admin_fail_limit: int = 30
+    admin_fail_window_s: int = 900
+
+    # FastAPI's /docs + /openapi.json. OFF by default: the schema enumerates every
+    # admin route and its request shape, which is a free map for anyone probing the
+    # public surface. Set DOCS_ENABLED=true locally when you want the explorer.
+    docs_enabled: bool = False                          # DOCS_ENABLED
+
 
 settings = ApiSettings()

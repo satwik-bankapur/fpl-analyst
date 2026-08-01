@@ -50,4 +50,14 @@ class RateLimiter:
             self._hits.clear()
 
 
+# Brief GENERATIONS. Fired from `before_generate`, so cache hits never touch it.
 limiter = RateLimiter(settings.brief_rate_limit, settings.brief_rate_window_s)
+
+# Public POST REQUESTS, fired before any DB write. `limiter` cannot bound row
+# growth or mail volume because it only sees generations: POST /api/brief writes a
+# `draft_squads` row *before* the cache is consulted, and POST /api/signup writes a
+# row and sends a welcome email without ever reaching the graph.
+request_limiter = RateLimiter(settings.request_rate_limit, settings.request_rate_window_s)
+
+# Failed admin auth attempts. Recorded only on rejection.
+admin_limiter = RateLimiter(settings.admin_fail_limit, settings.admin_fail_window_s)

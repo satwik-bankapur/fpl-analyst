@@ -47,7 +47,16 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="FPL Analyst API", lifespan=lifespan)
+# Interactive docs are OFF unless DOCS_ENABLED=true. The generated schema lists
+# every /api/admin/* path and its exact request body — a free map of the gated
+# surface for anyone probing the public one. Nothing in the product reads it.
+app = FastAPI(
+    title="FPL Analyst API",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.docs_enabled else None,
+    redoc_url="/redoc" if settings.docs_enabled else None,
+    openapi_url="/openapi.json" if settings.docs_enabled else None,
+)
 
 app.add_middleware(
     CORSMiddleware,

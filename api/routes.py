@@ -4,9 +4,11 @@ Stage A surface only: brief (draft path), preview, players, signup, health, admi
 """
 from __future__ import annotations
 
+import secrets
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from fpl.errors import FPLError
@@ -14,10 +16,22 @@ from graph.deps import Deps
 
 from . import admin, inspect, mail, service
 from .config import settings
-from .ratelimit import limiter
+from .ratelimit import admin_limiter, limiter, request_limiter
 from .service import get_deps
 
 router = APIRouter(prefix="/api")
+
+# Upper bound for every externally-supplied id (player, FPL team, draft-squad
+# member). Python ints are unbounded and pydantic will happily accept 10**400 for
+# an `int` field; that value then reaches a Postgres `integer` column and raises a
+# DataError, i.e. a 500 on attacker-chosen input. FPL ids live in the low
+# millions, so anything past this is not a typo, it is a probe.
+MAX_ID = 99_999_999
+MAX_GAMEWEEK = 38
+
+PlayerId = Annotated[int, Field(ge=1, le=MAX_ID)]
+TeamId = Annotated[int, Field(ge=1, le=MAX_ID)]
+GameweekNo = Annotated[int, Field(ge=1, le=MAX_GAMEWEEK)]
 
 
 def _valid_email(v: str | None) -> str | None:
@@ -32,18 +46,23 @@ def _valid_email(v: str | None) -> str | None:
 
 
 # --- request models --------------------------------------------------------
+#
+# EVERY field carries a bound. These models are the trust boundary for an
+# unauthenticated surface, so an absent bound is not "no opinion", it is an
+# accepted value — and pydantic's bare `int`/`str` accept arbitrary magnitude and
+# arbitrary length.
 
 class Draft(BaseModel):
     # The exact-15 rule is enforced in `service.validate_draft`, not here, so the
     # caller gets a 400 with a specific `squad_size` code alongside every other
     # squad-rule rejection — rather than one lone 422 from pydantic. max_length
     # stays as a payload bound so a million-id body is refused before any DB work.
-    player_ids: list[int] = Field(min_length=1, max_length=100)
-    captain_id: int | None = None
+    player_ids: list[PlayerId] = Field(min_length=1, max_length=100)
+    captain_id: PlayerId | None = None
 
 
 class BriefRequest(BaseModel):
-    team_id: int | None = None
+    team_id: TeamId | None = None
     draft: Draft | None = None
     email: str | None = None
     _ck_email = field_validator("email")(_valid_email)
@@ -51,20 +70,22 @@ class BriefRequest(BaseModel):
 
 class SignupRequest(BaseModel):
     email: str
-    team_id: int | None = None
-    source: str | None = None
+    team_id: TeamId | None = None
+    # Acquisition tag, written by our own frontend. Bounded because it is a
+    # client-supplied string that lands in a Text column on a public route.
+    source: str | None = Field(default=None, max_length=64)
     _ck_email = field_validator("email")(_valid_email)
 
 
 class NoteRequest(BaseModel):
-    team_id: int
-    note: str
+    team_id: TeamId
+    note: str = Field(max_length=4000)
 
 
 class EuroWeekRequest(BaseModel):
-    team_id: int
-    gameweek: int
-    competition: str
+    team_id: TeamId
+    gameweek: GameweekNo
+    competition: str = Field(max_length=16)
     tie_importance: int = Field(ge=1, le=3)
 
 
@@ -75,23 +96,53 @@ class EuroWeekReplace(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
+    """The client address the rate limiters key on.
+
+    RIGHTMOST entry of X-Forwarded-For, not leftmost. A reverse proxy APPENDS the
+    peer it actually saw, so the last element is the one Render observed and the
+    only one the caller cannot forge. Reading the leftmost element — which is
+    whatever arbitrary string the client chose to send — made every per-IP limit
+    on this surface bypassable by rotating one header value per request.
+
+    # ponytail: assumes exactly one trusted proxy hop (Render's edge). Add a
+    # trusted-hop count if a CDN is ever put in front of it.
+    """
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[0].strip()
+        return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
-def _require_admin(authorization: str = Header(default="")) -> None:
+def _require_admin(request: Request, authorization: str = Header(default="")) -> None:
     token = authorization[7:] if authorization.startswith("Bearer ") else ""
+    # compare_digest, not `!=`: `!=` on str short-circuits at the first differing
+    # byte, so its runtime leaks a prefix-match length. Both operands are ASCII by
+    # construction (an HTTP header value and an env var), which compare_digest
+    # requires.
+    ok = bool(settings.admin_token) and secrets.compare_digest(
+        token, settings.admin_token)
+    if ok:
+        return
     # Empty ADMIN_TOKEN => admin endpoints are closed, never open-by-misconfig.
-    if not settings.admin_token or token != settings.admin_token:
-        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+    # Record the failure (successes are never recorded, so the operator's own
+    # traffic can never lock them out) and let RateLimited surface as 429.
+    admin_limiter.enforce(_client_ip(request))
+    raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+
+
+def _enforce_request_budget(request: Request) -> None:
+    """Per-IP cap on public POSTs, applied BEFORE anything is written or sent."""
+    request_limiter.enforce(_client_ip(request))
 
 
 # --- 1.1 / draft brief -----------------------------------------------------
 
 @router.post("/brief")
 def post_brief(body: BriefRequest, request: Request, deps: Deps = Depends(get_deps)):
+    # Budget check first: `limiter` below only counts GENERATIONS, and the draft
+    # row is written before the cache is consulted — so without this, replaying one
+    # valid squad body grows `draft_squads` without bound and never trips a limit.
+    _enforce_request_budget(request)
     if body.draft is not None:
         # Validate BEFORE persisting: an illegal squad must not leave a draft row
         # (or an email signup) behind for a brief that will never be generated.
@@ -127,7 +178,9 @@ def get_draft_brief(draft_id: uuid.UUID, deps: Deps = Depends(get_deps)):
 
 
 @router.get("/brief/{team_id}/{gw}")
-def get_team_brief(team_id: int, gw: int, deps: Deps = Depends(get_deps)):
+def get_team_brief(team_id: int = Path(ge=1, le=MAX_ID),
+                   gw: int = Path(ge=0, le=MAX_GAMEWEEK),
+                   deps: Deps = Depends(get_deps)):
     # Stage A: no season briefs are generated and no tokens are minted, so this
     # only ever serves an already-persisted brief (free view).
     #
@@ -152,7 +205,8 @@ def preview_latest(response: Response, deps: Deps = Depends(get_deps)):
 
 
 @router.get("/preview/{gw}")
-def preview_gw(gw: int, response: Response, deps: Deps = Depends(get_deps)):
+def preview_gw(response: Response, gw: int = Path(ge=1, le=MAX_GAMEWEEK),
+               deps: Deps = Depends(get_deps)):
     response.headers["Cache-Control"] = "public, max-age=3600"
     return service.preview(deps, gw)
 
@@ -173,7 +227,12 @@ def _safe_signup(deps: Deps, email: str, team_id: int | None, source: str | None
 
 
 @router.post("/signup")
-def signup(body: SignupRequest, deps: Deps = Depends(get_deps)):
+def signup(body: SignupRequest, request: Request, deps: Deps = Depends(get_deps)):
+    # This route SENDS AN EMAIL to an address the caller chose and did not prove
+    # they own. Unlimited, that is a mail bomb pointed at a third party and a
+    # bounce-rate problem pointed at our sending domain. The cap is the floor, not
+    # the fix — double opt-in is the fix (docs/AUDIT.md, Stage B requirements).
+    _enforce_request_budget(request)
     _safe_signup(deps, body.email, body.team_id, body.source)
     return {"ok": True}
 
@@ -246,7 +305,7 @@ def admin_players(q: str = "", flagged: bool = False,
 
 
 @router.get("/admin/fixtures/{team_short}")
-def admin_fixtures(team_short: str, n: int = 6,
+def admin_fixtures(team_short: str = Path(max_length=8), n: int = 6,
                    _: None = Depends(_require_admin), deps: Deps = Depends(get_deps)):
     got = admin.team_fixtures(deps, team_short, max(1, min(n, 38)))
     if got is None:
@@ -278,7 +337,8 @@ def admin_inspect_briefs(n: int = 25, _: None = Depends(_require_admin),
 
 
 @router.get("/admin/inspect/player/{player_id}")
-def admin_inspect_player(player_id: int, _: None = Depends(_require_admin),
+def admin_inspect_player(player_id: int = Path(ge=1, le=MAX_ID),
+                         _: None = Depends(_require_admin),
                          deps: Deps = Depends(get_deps)):
     got = inspect.player_components(deps, player_id)
     if got is None:
@@ -296,7 +356,9 @@ def admin_inspect_draft(draft_id: uuid.UUID, _: None = Depends(_require_admin),
 
 
 @router.get("/admin/inspect/team/{team_id}/{gw}")
-def admin_inspect_team(team_id: int, gw: int, _: None = Depends(_require_admin),
+def admin_inspect_team(team_id: int = Path(ge=1, le=MAX_ID),
+                       gw: int = Path(ge=0, le=MAX_GAMEWEEK),
+                       _: None = Depends(_require_admin),
                        deps: Deps = Depends(get_deps)):
     got = inspect.inspect_team(deps, team_id, gw)
     if got is None:

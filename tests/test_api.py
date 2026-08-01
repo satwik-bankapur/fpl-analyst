@@ -34,7 +34,7 @@ from graph.deps import Deps
 from api import mail, service
 from api.config import settings
 from api.main import app
-from api.ratelimit import limiter
+from api.ratelimit import admin_limiter, limiter, request_limiter
 from api.service import get_deps
 
 ASSETS = Path(__file__).parent / "assets"
@@ -48,15 +48,20 @@ def _load(name):
 # Client wiring: override get_deps with the test session factory, reset limiter.
 # ---------------------------------------------------------------------------
 
+def _reset_limiters():
+    for lim in (limiter, request_limiter, admin_limiter):
+        lim.reset()
+
+
 @pytest.fixture
 def client_for():
     def make(SF, client_obj=None) -> TestClient:
         app.dependency_overrides[get_deps] = lambda: Deps(session_factory=SF, client=client_obj)
-        limiter.reset()
+        _reset_limiters()
         return TestClient(app)
     yield make
     app.dependency_overrides.clear()
-    limiter.reset()
+    _reset_limiters()
 
 
 # ---------------------------------------------------------------------------
@@ -899,3 +904,286 @@ def test_the_club_cap_is_one_shared_constant():
     mirror = (_Path(__file__).parents[1] / "web" / "lib" / "api.ts").read_text(
         encoding="utf-8")
     assert f"export const MAX_PER_CLUB = {MAX_PER_CLUB};" in mirror
+
+
+# ===========================================================================
+# Security audit regressions (2026-08-01) — docs/AUDIT.md
+#
+# Every test here pins a hole that was open on `main` at audit time. They assert
+# BEHAVIOUR (a status code, a stored row), not the constant that implements it,
+# so retuning a limit cannot silently delete the guarantee.
+# ===========================================================================
+
+# --- A: the per-IP key must not be client-supplied -------------------------
+
+def test_rate_limit_key_ignores_a_forged_x_forwarded_for(golden_sf, client_for):
+    """Rotating X-Forwarded-For must NOT hand the caller a fresh bucket.
+
+    `_client_ip` read `split(",")[0]` — the leftmost entry, which is entirely
+    whatever the client typed. One header per request bypassed every per-IP limit
+    on the surface. A proxy APPENDS the peer it saw, so only the rightmost entry
+    is evidence.
+    """
+    client = client_for(golden_sf)
+    ids, _ = _sample_squad()
+    # Same real peer (the rightmost hop), five different forged prefixes.
+    for i, cap in enumerate(ids[:5]):
+        r = client.post("/api/brief", json=_draft_body(ids, cap),
+                        headers={"X-Forwarded-For": f"10.0.0.{i}, 203.0.113.7"})
+        assert r.status_code == 200, r.text
+    blocked = client.post("/api/brief", json=_draft_body(ids, ids[5]),
+                          headers={"X-Forwarded-For": "10.0.0.99, 203.0.113.7"})
+    assert blocked.status_code == 429
+
+
+def test_distinct_real_peers_still_get_their_own_budget(golden_sf, client_for):
+    """The other half: the fix must not collapse every caller into one bucket."""
+    client = client_for(golden_sf)
+    ids, _ = _sample_squad()
+    for cap in ids[:5]:
+        assert client.post("/api/brief", json=_draft_body(ids, cap),
+                           headers={"X-Forwarded-For": "203.0.113.7"}).status_code == 200
+    other = client.post("/api/brief", json=_draft_body(ids, ids[5]),
+                        headers={"X-Forwarded-For": "198.51.100.4"})
+    assert other.status_code == 200, other.text
+
+
+# --- A: unbounded table growth / mail volume -------------------------------
+
+def test_replayed_brief_posts_stop_creating_draft_rows(golden_sf, client_for):
+    """A cache HIT still writes a draft_squads row, so generations cannot bound it.
+
+    The generation limiter never fires on a replayed identical body (by design —
+    "cache hits don't count"), which left an unauthenticated caller able to insert
+    rows forever. The request budget is what closes that.
+    """
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+    body = _draft_body(ids, cap)
+
+    codes = [client.post("/api/brief", json=body).status_code for _ in range(40)]
+    assert 429 in codes, "replaying one body was never refused"
+    with golden_sf() as s:
+        rows = s.scalar(select(func.count()).select_from(DraftSquad))
+    assert rows == codes.count(200), "a refused request still wrote a draft row"
+    assert rows < 40
+
+
+def test_signup_is_rate_limited_so_the_welcome_mail_cannot_be_weaponised(
+        golden_sf, client_for, monkeypatch):
+    """POST /api/signup mails an address the caller never proved they own."""
+    sent = []
+    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: sent.append(email) or True)
+    client = client_for(golden_sf)
+
+    codes = [client.post("/api/signup", json={"email": "victim@example.com"}).status_code
+             for _ in range(40)]
+    assert 429 in codes
+    assert len(sent) == codes.count(200) < 40
+
+
+# --- A: input bounds at the trust boundary ---------------------------------
+
+@pytest.mark.parametrize("body", [
+    # A Python int is unbounded; a Postgres `integer` column is not. Each of these
+    # reached the DB and raised a DataError — a 500 on chosen input — before bounds.
+    {"draft": {"player_ids": [10 ** 40] * 15, "captain_id": 1}},
+    {"draft": {"player_ids": [1] * 15, "captain_id": 10 ** 40}},
+    {"draft": {"player_ids": [-1] * 15}},
+    {"team_id": 10 ** 40},
+])
+def test_brief_rejects_out_of_range_ids(golden_sf, client_for, body):
+    assert client_for(golden_sf).post("/api/brief", json=body).status_code == 422
+
+
+@pytest.mark.parametrize("body", [
+    {"email": "a@b.com", "source": "x" * 65},     # unbounded Text on a public route
+    {"email": "a@b.com", "team_id": 10 ** 40},
+    {"email": "a@b.com", "team_id": -5},
+])
+def test_signup_rejects_out_of_range_fields(golden_sf, client_for, body):
+    assert client_for(golden_sf).post("/api/signup", json=body).status_code == 422
+
+
+@pytest.mark.parametrize("path", ["/api/brief/1/999", "/api/preview/999",
+                                  "/api/brief/99999999999999999999/1"])
+def test_path_params_are_bounded(golden_sf, client_for, path):
+    assert client_for(golden_sf).get(path).status_code == 422
+
+
+# --- A/E: re-signup must not destroy what is already stored ----------------
+
+def test_resignup_fills_blanks_and_never_overwrites(golden_sf, client_for, monkeypatch):
+    """`session.merge` wrote every column it was handed, including the NULLs.
+
+    POST /api/brief with an email calls signup with `team_id=None, source="draft"`,
+    so a homepage signup that carried a team id lost it the moment the same person
+    used the draft modal. `tier` was rewritten to 'free' unconditionally, which in
+    Stage B demotes a paying subscriber.
+    """
+    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: True)
+    client = client_for(golden_sf)
+
+    client.post("/api/signup", json={"email": "fan@example.com", "team_id": 4242,
+                                     "source": "homepage"})
+    with golden_sf() as s:                       # billing owns tier, not signup
+        row = s.get(EmailSignup, "fan@example.com")
+        row.tier = "paid"
+        s.commit()
+
+    # The draft-modal path: same address, no team id, a different source.
+    client.post("/api/signup", json={"email": "fan@example.com", "source": "draft"})
+
+    with golden_sf() as s:
+        row = s.get(EmailSignup, "fan@example.com")
+        assert row.fpl_team_id == 4242           # not NULLed
+        assert row.source == "homepage"          # not overwritten
+        assert row.tier == "paid"                # not demoted
+
+
+def test_signup_still_records_a_team_id_that_arrives_later(golden_sf, client_for,
+                                                           monkeypatch):
+    """Fill-blanks must still FILL — an empty column takes the new value."""
+    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: True)
+    client = client_for(golden_sf)
+    client.post("/api/signup", json={"email": "late@example.com"})
+    client.post("/api/signup", json={"email": "late@example.com", "team_id": 77,
+                                     "source": "draft"})
+    with golden_sf() as s:
+        row = s.get(EmailSignup, "late@example.com")
+        assert row.fpl_team_id == 77 and row.source == "draft"
+
+
+# --- B: the admin surface ---------------------------------------------------
+
+def _fill_path(path: str) -> str:
+    """Substitute a valid value for every `{param}` in a route template."""
+    out = path.replace("{draft_id}", "00000000-0000-0000-0000-000000000000")
+    out = out.replace("{team_short}", "ARS")
+    while "{" in out:                            # every remaining param is numeric
+        head, _, rest = out.partition("{")
+        _, _, tail = rest.partition("}")
+        out = head + "1" + tail
+    return out
+
+
+def test_every_admin_route_rejects_an_anonymous_caller(golden_sf, client_for,
+                                                       monkeypatch):
+    """Walked from the live router, not from a hand-kept list.
+
+    The existing coverage is a literal list of paths, which is only ever as complete
+    as whoever last added a route remembered to make it. One unguarded
+    /api/admin/* route is the entire operator surface, so the assertion has to be
+    derived from the thing that actually serves traffic.
+    """
+    from api.routes import router as _router      # the router `app` includes
+
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    admin_limiter.limit = 10_000                 # this test IS a burst of failures
+    try:
+        checked = []
+        for route in _router.routes:
+            path = getattr(route, "path", "")
+            if not path.startswith("/api/admin"):
+                continue
+            for method in sorted(getattr(route, "methods", set()) - {"HEAD", "OPTIONS"}):
+                r = client.request(method, _fill_path(path), json={})
+                assert r.status_code == 401, (
+                    f"{method} {path} answered {r.status_code} with no token")
+                checked.append(f"{method} {path}")
+
+        # A guard on the guard: if the walk matches nothing, every assertion above
+        # passes vacuously.
+        assert len(checked) >= 15, checked
+    finally:
+        admin_limiter.limit = settings.admin_fail_limit
+
+
+def test_admin_rejects_a_token_that_is_a_prefix_of_the_real_one(golden_sf, client_for,
+                                                               monkeypatch):
+    """Constant-time compare, sanity side: no partial credit for a prefix."""
+    monkeypatch.setattr(settings, "admin_token", "supersecrettoken")
+    client = client_for(golden_sf)
+    for wrong in ("supersecrettoke", "supersecrettokenX", "", "s"):
+        assert client.get("/api/admin/overview",
+                          headers={"Authorization": f"Bearer {wrong}"}).status_code == 401
+
+
+def test_admin_auth_uses_a_constant_time_compare():
+    """`!=` on str short-circuits at the first differing byte, leaking a prefix
+    length through timing. Asserted structurally: a timing measurement is flaky by
+    nature, and what must not regress is the call, not a duration."""
+    import inspect as _inspect
+
+    from api import routes as _routes
+
+    src = _inspect.getsource(_routes._require_admin)
+    assert "compare_digest" in src
+    assert "token != settings.admin_token" not in src
+
+
+def test_repeated_admin_failures_are_throttled(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "secret")
+    client = client_for(golden_sf)
+    admin_limiter.limit = 5
+    try:
+        codes = [client.get("/api/admin/overview",
+                            headers={"Authorization": "Bearer wrong"}).status_code
+                 for _ in range(8)]
+        assert codes[:5] == [401] * 5
+        assert codes[-1] == 429
+        # A correct token is never recorded, so the operator is never locked out.
+        assert client.get("/api/admin/overview", headers=_AUTH).status_code == 200
+    finally:
+        admin_limiter.limit = settings.admin_fail_limit
+
+
+# --- A: the schema is not a public map -------------------------------------
+
+def test_openapi_and_docs_are_closed_by_default(golden_sf, client_for):
+    client = client_for(golden_sf)
+    assert settings.docs_enabled is False
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+# --- F: connections survive Render sleep + Neon autosuspend ----------------
+
+def test_postgres_engine_pre_pings_and_recycles(monkeypatch):
+    """Without these, the first request after any quiet period 500s.
+
+    Render free sleeps after ~15 min idle and Neon free autosuspends its compute;
+    both drop TCP connections the pool still believes are live. Asserted by
+    capturing the kwargs because a real Postgres engine needs psycopg, which is an
+    optional extra and absent in CI.
+    """
+    from fpl import db as _db
+
+    seen = {}
+
+    def _spy(url, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(_db, "create_engine", _spy)
+    _db.make_engine("postgresql://u:p@h/dbname")
+    assert seen.get("pool_pre_ping") is True
+    assert seen.get("pool_recycle", 0) > 0
+
+    seen.clear()
+    monkeypatch.setattr(_db, "event", type("E", (), {"listens_for": lambda *a: (lambda f: f)}))
+    _db.make_engine("sqlite://")
+    # SQLite is a local file with no idle timeout; pinging it is pure overhead.
+    assert "pool_pre_ping" not in seen
+
+
+# --- G: the cache lookup is indexed ----------------------------------------
+
+def test_briefs_input_hash_is_indexed(golden_sf):
+    """`WHERE input_hash = ?` runs on every brief request; it was a table scan."""
+    from sqlalchemy import inspect as sa_inspect
+
+    with golden_sf() as s:
+        names = {ix["name"] for ix in sa_inspect(s.get_bind()).get_indexes("briefs")}
+    assert "ix_briefs_input_hash" in names
