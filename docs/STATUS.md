@@ -4,13 +4,16 @@ Written by reading the repo, running the suites, and tracing contracts end to en
 **Not** by reading the specs. Where the specs and the code disagree, the code wins
 and the disagreement is recorded below.
 
-**Two passes are recorded here.** The audit (§1–6) was read-only. A follow-up
+**Three passes are recorded here.** The audit (§1–6) was read-only. A follow-up
 pre-hibernation pass then fixed the items marked ✅ **FIXED** — see §7 for exactly
 what changed and what deliberately did not. Where a §1–6 finding has been resolved,
 the original text is kept (so the reasoning survives) with the fix noted inline.
+**§8 records the 2026-08-01 security & quality audit**, whose full findings live in
+`docs/AUDIT.md`.
 
-Post-fix state: **155 tests passing**, `npm run build` clean, everything merged to
-`main` and pushed.
+Post-fix state as of 2026-08-01: **275 tests passing**, `npm run build` clean,
+`alembic upgrade head` = `c3d4e5f6a7b8`. The §7 pass reported 155 tests; the inspector
+and admin console work took it to 252, and the security pass added 23 regressions.
 
 ---
 
@@ -766,3 +769,80 @@ Items 1 and 2 from §6 are done. Replacements:
    iterate the prompt to v0.2+, or commit to shipping template briefs and stop describing
    the product as AI-written. Both are defensible; the current in-between is what makes
    the repo hard to read honestly.
+
+---
+
+## 8. Security & quality audit — 2026-08-01
+
+Full findings, evidence and effort estimates: **`docs/AUDIT.md`**. This section records
+only what changed about the *stated state of the app*, so §1–7 above stay readable.
+
+30 findings: 2 CRITICAL, 12 HIGH, 11 MEDIUM, 5 LOW. 13 fixed on branch
+`audit-2026-08-01`; 17 deferred by instruction (design decision, Stage B, or
+known-deferred). Suite 252 → **275 passing**; every fix carries a regression test.
+
+### What this changes about claims made earlier in this document
+
+- **"Rate limiting works" is now true; it was not before.** `_client_ip` read the
+  *leftmost* `X-Forwarded-For` entry — a value the caller supplies — so every per-IP
+  limit on the public surface was bypassable with one rotating header. Fixed (reads the
+  rightmost, proxy-appended entry). **But see the standing caveat below.**
+- **The admin surface is no longer the single-control surface §5 implied.** The token is
+  now compared with `secrets.compare_digest` (it was `!=`, a timing oracle), failed
+  attempts are throttled, and a router-derived test asserts all **15** admin operations
+  reject an anonymous caller — so a new `/api/admin/*` route added without
+  `_require_admin` now fails the suite rather than shipping open.
+- **`POST /api/signup` was an unauthenticated mail cannon.** No rate limit, and a welcome
+  email sent on every call to any address. Now rate-limited. The real fix — double opt-in
+  — is a Stage B requirement (AUDIT §D5), not done.
+- **`email_signups` was losing data on every re-signup.** `service.signup` used
+  `session.merge` with the request's values, so the draft-modal path (`team_id=None,
+  source="draft"`) NULLed a homepage signup's team id and rewrote its source — and set
+  `tier="free"` unconditionally, which in Stage B **demotes a paying subscriber**. Now
+  fills blanks only; `tier` is not written here at all.
+- **`/api/docs` and `/openapi.json` were public** — a full map of the admin surface. Now
+  off by default behind `DOCS_ENABLED`.
+- **The free-tier deployment would have 500'd its first visitor after every sleep.**
+  `fpl/db.py` had no `pool_pre_ping`; Render sleeps and Neon autosuspends, both leaving
+  dead sockets in the pool. Fixed.
+- **The brief cache lookup was a table scan.** `briefs.input_hash` had no index despite
+  being read on every request. Fixed + migration `c3d4e5f6a7b8`.
+
+### Standing caveat — the rate limiter is still not production-grade
+
+Worth stating here because §2 and §4 read as if it is. `api/ratelimit.py` is an
+in-process dict on a service that sleeps every 15 minutes: **every counter resets on
+every wake**, and it is per-process. Post-fix it is real protection against a naive
+script and none against a patient one. It must be replaced with a DB-backed counter
+(and/or a global daily cap) **before `PAYWALL_ENABLED` or any LLM wiring**, because
+that is the moment it starts guarding money instead of CPU. Three costed options in
+AUDIT §C2.
+
+### Confirmed clean — do not re-audit these
+
+- **No committed secrets** in the full git history. The two `postgresql://user:pass@…`
+  hits are placeholders in the two deploy runbooks. Nothing to rotate.
+- **No hardcoded credential or fallback secret.** Every secret defaults to empty and
+  empty fails *closed* (admin shut, mail a logged no-op) — the opposite of the
+  "if no secret use 'dev'" pattern.
+- **`pip-audit`: no known vulnerabilities.**
+- **No SQL injection surface.** Everything is ORM/Core; the only `text()` calls carry
+  literal partial-index predicates.
+- **No XSS vector in the admin UI.** Zero `dangerouslySetInnerHTML`/`innerHTML` anywhere
+  in `web/`; `players.news` and `team_notes.note` render as escaped React text children.
+- **`sync_fpl` is genuinely abort-or-nothing**, and every other multi-write path is
+  inside a single `session.begin()`.
+- **Timezones are correct end to end** — aware on ingest, `timestamptz` in storage,
+  `iso_utc` on the way out. One latent naive-vs-aware bug in the *quarantined* scheduler
+  (AUDIT M4).
+- **`alembic upgrade head` is safe against a populated production DB** — every migration
+  audited; the only destructive operations are in `downgrade()`.
+
+### Two open questions this audit raises for you
+
+1. **Retention.** `draft_squads`, `briefs` and `email_signups` grow without bound and
+   nothing would tell you before Neon's 0.5 GB runs out. AUDIT §H5 proposes a policy and
+   the cheapest place to run it (inside the existing sync handler). Needs your numbers.
+2. **`next@14.2.35`** carries several high-severity advisories and the remedy is
+   `next@16` — two majors, roughly half a day including re-verifying the re-skin. It gets
+   more expensive the longer Stage B builds on 14.

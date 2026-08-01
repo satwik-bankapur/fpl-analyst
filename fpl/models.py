@@ -236,6 +236,13 @@ class Brief(Base):
             sqlite_where=text("fpl_team_id IS NULL AND draft_id IS NULL"),
             postgresql_where=text("fpl_team_id IS NULL AND draft_id IS NULL"),
         ),
+        # The cache lookup. `graph.cache.get_or_generate` runs
+        # `WHERE input_hash = ?` on EVERY brief request, and the three indexes
+        # above are all on other columns — so the hottest read in the product was a
+        # sequential scan whose cost grows with every brief ever generated. Not
+        # unique: a regenerated brief legitimately repeats a hash after a row is
+        # superseded (see api/inspect._cache_state).
+        Index("ix_briefs_input_hash", "input_hash"),
     )
 
 

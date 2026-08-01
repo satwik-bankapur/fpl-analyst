@@ -308,9 +308,31 @@ def run_sync(deps: Deps) -> dict:
 
 
 def signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> None:
+    """Idempotent join. A repeat signup FILLS BLANKS ONLY — it never overwrites.
+
+    This was `session.merge(EmailSignup(..., tier="free", ...))`, which writes every
+    column it was handed. Two ways that loses data, both reachable today:
+
+    - POST /api/brief with an email calls this with `team_id=None, source="draft"`
+      (routes._safe_signup). A subscriber who had signed up from the homepage with
+      their team id got that id NULLed and their acquisition source rewritten.
+    - `tier="free"` is unconditional, so in Stage B any re-signup — including the
+      one the draft modal fires automatically — DEMOTES A PAYING SUBSCRIBER. The
+      gating would then read `tier` and correctly withhold what they paid for.
+
+    So: insert on first sight, and afterwards only fill in what is still empty.
+    Tier is never written here at all; billing owns it.
+    """
     with deps.session_factory() as session, session.begin():
-        session.merge(EmailSignup(email=email, fpl_team_id=team_id,
-                                  tier="free", source=source))
+        row = session.get(EmailSignup, email)
+        if row is None:
+            session.add(EmailSignup(email=email, fpl_team_id=team_id,
+                                    tier="free", source=source))
+            return
+        if row.fpl_team_id is None and team_id is not None:
+            row.fpl_team_id = team_id
+        if row.source is None and source is not None:
+            row.source = source
 
 
 # --- curated-table writes --------------------------------------------------

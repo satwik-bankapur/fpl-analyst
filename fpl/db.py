@@ -16,9 +16,19 @@ from .config import settings
 def make_engine(url: str | None = None) -> Engine:
     url = url or settings.database_url
     connect_args = {}
+    kwargs = {}
     if url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
-    engine = create_engine(url, future=True, connect_args=connect_args)
+    else:
+        # The launch topology is Render free (sleeps after ~15 min idle) in front of
+        # Neon free (autosuspends the compute). Both sides drop TCP connections the
+        # pool still believes are live, so the FIRST request after any quiet period
+        # hands a dead socket to a user and 500s. pool_pre_ping spends one cheap
+        # round trip to find that out before the query instead of after it;
+        # pool_recycle retires connections before the idle timeout can.
+        kwargs["pool_pre_ping"] = True
+        kwargs["pool_recycle"] = 300
+    engine = create_engine(url, future=True, connect_args=connect_args, **kwargs)
     if url.startswith("sqlite"):
         # Enforce FK constraints on SQLite (off by default) so dev matches prod.
         @event.listens_for(engine, "connect")

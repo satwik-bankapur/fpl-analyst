@@ -10,7 +10,12 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
+# Every env variant, not just `.env`: pydantic-settings only reads `.env`, but the
+# file a human creates by hand is as often `.env.local` or `.env.production`, and
+# that one held real values while being tracked.
 .env
+.env.*
+!.env.example
 
 # OS
 .DS_Store
