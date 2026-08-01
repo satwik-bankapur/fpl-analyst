@@ -4,22 +4,29 @@ Stage A surface only: brief (draft path), preview, players, signup, health, admi
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import uuid
-from typing import Annotated
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 
 from fpl.errors import FPLError
 from graph.deps import Deps
 
-from . import admin, inspect, mail, service
+from . import admin, billing, inspect, mail, send, service, tokens
 from .config import settings
-from .ratelimit import admin_limiter, limiter, request_limiter
+from .ratelimit import (
+    GLOBAL_BUCKET, admin_limiter, db_limiter, global_limiter, limiter,
+    request_limiter,
+)
 from .service import get_deps
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("api.routes")
 
 # Upper bound for every externally-supplied id (player, FPL team, draft-squad
 # member). Python ints are unbounded and pydantic will happily accept 10**400 for
@@ -89,6 +96,21 @@ class EuroWeekRequest(BaseModel):
     tie_importance: int = Field(ge=1, le=3)
 
 
+class CheckoutRequest(BaseModel):
+    """§1.6. Note what is ABSENT: no price, no amount, no currency, no price id.
+
+    The client names a PLAN and the server resolves what that costs
+    (`billing.price_id_for_plan`). There is no field here a caller could tamper
+    with to change what they pay — that is audit §D3's requirement, expressed as a
+    schema rather than as a validation rule that someone can forget to run.
+    """
+
+    email: str
+    team_id: TeamId | None = None
+    plan: Literal["monthly", "season"]
+    _ck_email = field_validator("email")(_valid_email)
+
+
 class EuroWeekReplace(BaseModel):
     # The whole grid in one submission. Bounded so a malformed client can't hand
     # the DB an unbounded rewrite; 20 clubs x 38 GWs is the real ceiling.
@@ -135,6 +157,28 @@ def _enforce_request_budget(request: Request) -> None:
     request_limiter.enforce(_client_ip(request))
 
 
+def _enforce_generation_budget(request: Request, deps: Deps) -> None:
+    """The DURABLE generation cap. Fires only on a real cache miss.
+
+    Three layers, cheapest first, and the order matters:
+
+    1. `limiter` — in-process, free, catches the obvious burst without a query.
+    2. `db_limiter` — per-IP in `rate_hits`, survives the Render sleep that resets
+       (1). This is the one that actually holds in production (audit §C2).
+    3. `global_limiter` — whole-service circuit breaker. (2) stops one abuser;
+       this caps the bill when (2) has a bug. Checked LAST so a caller who is
+       already over their own limit does not consume global budget on the way to
+       being refused.
+
+    Stage B is why (2) and (3) exist at all: this counter now guards LLM spend and
+    paid delivery, not just CPU.
+    """
+    ip = _client_ip(request)
+    limiter.enforce(ip)
+    db_limiter.enforce(deps.session_factory, f"ip:{ip}")
+    global_limiter.enforce(deps.session_factory, GLOBAL_BUCKET)
+
+
 # --- 1.1 / draft brief -----------------------------------------------------
 
 @router.post("/brief")
@@ -157,7 +201,8 @@ def post_brief(body: BriefRequest, request: Request, deps: Deps = Depends(get_de
         if body.email:  # draft-modal email also joins the free list
             _safe_signup(deps, body.email, None, "draft")
         return service.brief_from_draft(
-            deps, did, before_generate=lambda: limiter.enforce(_client_ip(request)))
+            deps, did,
+            before_generate=lambda: _enforce_generation_budget(request, deps))
 
     if body.team_id is not None:
         if service.mode_of(deps) != "IN_SEASON":
@@ -180,17 +225,20 @@ def get_draft_brief(draft_id: uuid.UUID, deps: Deps = Depends(get_deps)):
 @router.get("/brief/{team_id}/{gw}")
 def get_team_brief(team_id: int = Path(ge=1, le=MAX_ID),
                    gw: int = Path(ge=0, le=MAX_GAMEWEEK),
+                   token: str | None = None,
                    deps: Deps = Depends(get_deps)):
-    # Stage A: no season briefs are generated and no tokens are minted, so this
-    # only ever serves an already-persisted brief (free view).
-    #
-    # The spec's `?token=` param (§1.2) is DELIBERATELY ABSENT rather than
-    # accepted-and-ignored (removed 2026-07-30). Nothing mints or verifies a JWT
-    # yet, and a signature-shaped parameter that silently does nothing reads as
-    # implemented auth to the next person. Stage B adds it back together with
-    # BRIEF_TOKEN_SECRET and the send job that mints it. FastAPI ignores unknown
-    # query params, so an early `?token=x` caller still gets the free view.
-    brief = service.get_team_brief(deps, team_id, gw)
+    """§1.2. No/invalid token -> free view. Valid token + live entitlement -> full.
+
+    `?token=` is BACK (Stage B, 2026-08-01). It was deliberately absent through
+    Stage A — nothing minted or verified a JWT, and a signature-shaped parameter
+    that silently does nothing reads as implemented auth to the next person. It
+    returns now together with `BRIEF_TOKEN_SECRET`, `api/tokens.py` and the send
+    job that mints it.
+
+    An invalid token is NOT an error: the contract is "degrade to free", and a 401
+    here would tell a forger exactly which of their attempts was closer.
+    """
+    brief = service.get_team_brief(deps, team_id, gw, token)
     if brief is None:
         raise HTTPException(status_code=404, detail={"error": "invalid_team_id"})
     return brief
@@ -235,6 +283,130 @@ def signup(body: SignupRequest, request: Request, deps: Deps = Depends(get_deps)
     _enforce_request_budget(request)
     _safe_signup(deps, body.email, body.team_id, body.source)
     return {"ok": True}
+
+
+# --- 1.6 checkout ----------------------------------------------------------
+
+@router.post("/checkout")
+def checkout(body: CheckoutRequest, request: Request, deps: Deps = Depends(get_deps)):
+    """Create a Paddle checkout for a PLAN NAME. The server owns the price.
+
+    Nothing is granted here. The checkout-success redirect is a UI event and is
+    fully forgeable, so entitlement comes only from the verified webhook
+    (audit §D3) — this route's entire job is to hand back a URL.
+    """
+    _enforce_request_budget(request)
+    # The address goes on the free list now, so an abandoned checkout still leaves
+    # a lead and still gets the weekly preview.
+    _safe_signup(deps, body.email, body.team_id, "checkout")
+    try:
+        url = billing.create_checkout(body.plan, body.email, body.team_id)
+    except billing.CheckoutError as e:
+        # 503, not 400: every failure mode here is OUR misconfiguration or the
+        # provider's, never the caller's — `plan` was already validated by the
+        # Literal on the model.
+        log.warning("checkout failed: %s (%s)", e.code, e.message)
+        raise HTTPException(status_code=503, detail={"error": e.code})
+    return {"checkout_url": url}
+
+
+# --- 1.7 the Paddle webhook ------------------------------------------------
+
+@router.post("/webhooks/paddle")
+async def paddle_webhook(request: Request, deps: Deps = Depends(get_deps)):
+    """§4 / audit §D1. Verify, then parse, then apply once.
+
+    NOTE THE SIGNATURE OF THIS FUNCTION: it takes `Request`, not a pydantic model.
+    That is the whole verify-before-parse requirement expressed in code — declaring
+    a body model would have FastAPI deserialize attacker-controlled JSON before
+    this function ever runs, which is exactly what §D1.1 forbids. Read the raw
+    bytes, prove they came from Paddle, and only then call `json.loads`.
+    """
+    raw = await request.body()
+    try:
+        billing.verify_signature(raw, request.headers.get("paddle-signature"))
+        payload = billing.parse_verified(raw)
+    except billing.SignatureError as e:
+        # 401 with NO detail. The reason goes to our log; telling an attacker
+        # whether they got the timestamp or the HMAC wrong is free help.
+        log.warning("paddle webhook rejected: %s", e)
+        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+
+    event_id = str(payload.get("event_id") or "")
+    with deps.session_factory() as session:
+        if event_id and billing.already_processed(session, event_id):
+            # Paddle redelivers on any non-2xx, so a duplicate must be a cheerful
+            # 200 — a 4xx here would make it retry forever.
+            return {"ok": True, "action": "duplicate", "duplicate": True}
+
+    try:
+        with deps.session_factory() as session, session.begin():
+            handled = billing.handle_event(session, payload)
+    except IntegrityError:
+        # The race the pre-check above cannot cover: a concurrent redelivery got
+        # there between our SELECT and our INSERT. The PK did its job.
+        log.info("paddle webhook: concurrent duplicate event_id=%s", event_id)
+        return {"ok": True, "action": "duplicate", "duplicate": True}
+    except billing.SignatureError as e:
+        log.warning("paddle webhook: verified payload was unusable: %s", e)
+        raise HTTPException(status_code=400, detail={"error": "bad_payload"})
+
+    return handled.as_dict()
+
+
+# --- 1.8 unsubscribe + delete ----------------------------------------------
+#
+# Both live on the API rather than the frontend because the one-click List-
+# Unsubscribe header must point at something that acts on a POST with no session,
+# no JavaScript and no cookie.
+
+@router.get("/email/unsubscribe")
+def email_unsubscribe(e: str = "", t: str = "", deps: Deps = Depends(get_deps)):
+    """One-click unsubscribe from a mailed link (GET, per RFC 8058 the landing).
+
+    The token is a keyed HMAC of the address, so the link is unguessable and needs
+    no session — and it never expires, because mail sits in inboxes for years and
+    an expired unsubscribe link is, for deliverability purposes, no link at all.
+    """
+    if not e or not t or not tokens.unsubscribe_token_valid(e, t):
+        raise HTTPException(status_code=400, detail={"error": "invalid_token"})
+    service.unsubscribe(deps, e)
+    # Identical response whether or not the address was on the list — this endpoint
+    # must not become an oracle for "is this person a customer".
+    return {"ok": True, "email": e, "status": "unsubscribed",
+            "note": "Billing access, if any, is unaffected."}
+
+
+@router.post("/email/unsubscribe")
+def email_unsubscribe_post(e: str = "", t: str = "", deps: Deps = Depends(get_deps)):
+    """The `List-Unsubscribe-Post: List-Unsubscribe=One-Click` target (RFC 8058).
+
+    Gmail and Yahoo POST here directly, without a human. Same effect as the GET.
+    """
+    return email_unsubscribe(e=e, t=t, deps=deps)
+
+
+@router.post("/email/resubscribe")
+def email_resubscribe(e: str = "", t: str = "", deps: Deps = Depends(get_deps)):
+    """"Actually, keep sending" — the undo on the unsubscribe landing page."""
+    if not e or not t or not tokens.unsubscribe_token_valid(e, t):
+        raise HTTPException(status_code=400, detail={"error": "invalid_token"})
+    service.resubscribe(deps, e)
+    return {"ok": True, "email": e, "status": "subscribed"}
+
+
+@router.post("/email/delete")
+def email_delete(e: str = "", t: str = "", deps: Deps = Depends(get_deps)):
+    """Delete my data: removes the mailing-list row outright.
+
+    A DIFFERENT action from unsubscribe, deliberately — see `service.delete_signup`.
+    Subscription rows are anonymised rather than deleted: they are the record of a
+    financial transaction, which we are required to keep.
+    """
+    if not e or not t or not tokens.unsubscribe_token_valid(e, t):
+        raise HTTPException(status_code=400, detail={"error": "invalid_token"})
+    result = service.delete_signup(deps, e)
+    return {"ok": True, **result}
 
 
 # --- 1.9 health + admin ----------------------------------------------------
@@ -375,6 +547,54 @@ def admin_sync(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)
     as 503 so the cron job fails loudly rather than reporting a phantom success.
     """
     try:
-        return service.run_sync(deps)
+        result = service.run_sync(deps)
     except FPLError as e:
         raise HTTPException(status_code=503, detail={"error": e.code})
+    # Retention sweep for the limiter's own table, on the one route that already
+    # runs on a schedule. Without it `rate_hits` grows one row per bucket per
+    # window forever — reintroducing, inside the fix for unbounded growth, exactly
+    # the unbounded growth the audit flagged (§H5).
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+    result["rate_hits_purged"] = global_limiter.purge_before(deps.session_factory, cutoff)
+    return result
+
+
+@router.post("/admin/preview")
+def admin_preview(gw: int | None = None, _: None = Depends(_require_admin),
+                  deps: Deps = Depends(get_deps)):
+    """Generate + persist THE generic weekly preview (Layer 4 §6).
+
+    The send job's free template reads this persisted row and has no other content
+    source, so this runs before a batch. Singleton per gameweek — a rerun refreshes
+    rather than duplicating.
+    """
+    return service.persist_generic_preview(deps, gw)
+
+
+@router.post("/admin/send")
+def admin_send(gw: int, retry: bool = False, _: None = Depends(_require_admin),
+               deps: Deps = Depends(get_deps)):
+    """Run the weekly send batch for `gw` (spec §3), or its one retry pass.
+
+    Behind ADMIN_TOKEN and driven by the same external cron as sync, for the same
+    reason: a free Render service cannot hold a scheduler. Idempotent — `send_log`
+    makes a rerun a no-op for anyone already mailed, so a cron that fires twice
+    costs nothing.
+    """
+    if retry:
+        return send.retry_failed(deps, gw).as_dict()
+    return send.run_batch(deps, gw).as_dict()
+
+
+@router.get("/admin/subscriptions")
+def admin_subscriptions(_: None = Depends(_require_admin),
+                        deps: Deps = Depends(get_deps)):
+    """Billing state as the gate actually sees it — `entitled` is `is_entitled`.
+
+    Shows the verdict next to the raw status so an operator can see WHY someone is
+    or is not being served, rather than inferring it from a status string whose
+    meaning lives in another file.
+    """
+    return admin.subscriptions(deps)

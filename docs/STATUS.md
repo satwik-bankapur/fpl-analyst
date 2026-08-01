@@ -846,3 +846,63 @@ AUDIT §C2.
 2. **`next@14.2.35`** carries several high-severity advisories and the remedy is
    `next@16` — two majors, roughly half a day including re-verifying the re-skin. It gets
    more expensive the longer Stage B builds on 14.
+
+---
+
+## 9. Stage B — payments, built and switched off (2026-08-01)
+
+Branch `stage-b`. Full design rationale: `docs/layer5-delivery-surface.md` §8, the
+2026-08-01 note. Requirements it was built against: `docs/AUDIT.md` §D.
+
+Suite 275 → **383 passing** (`tests/test_stage_b.py`, 104 new tests). `npm run build`
+clean, 12 routes.
+
+### What this changes about claims made earlier in this document
+
+- **§3 "What's missing between here and a paying customer" is now mostly built.** Checkout
+  (`POST /api/checkout`), the signed webhook (`POST /api/webhooks/paddle`), the four new
+  tables, tokenized full-view links, the weekly send batch, unsubscribe/delete and the
+  paywall flip all exist. What remains between here and revenue is **an account and a
+  deploy**, not code.
+- **§8's standing caveat is discharged.** Anything that costs money now goes through a
+  DB-backed counter (`rate_hits`) plus a global circuit-breaker bucket, so a Render sleep
+  no longer resets the budget. The in-process limiter is kept as the cheap first layer.
+- **"Nothing is deployed" is still true**, and it is now the binding constraint.
+
+### The switches, and what each one costs to flip
+
+Everything ships off. In order:
+
+| Switch | Needs | Blast radius if wrong |
+|---|---|---|
+| `BRIEF_TOKEN_SECRET` | 32+ random chars | App refuses to boot without it once the two below are on — deliberate |
+| `PAYWALL_ENABLED` | nothing else | Paid sections lock. With no `PADDLE_WEBHOOK_SECRET` nothing can ever unlock — the startup check warns |
+| `PADDLE_*` | a Paddle account, a verified webhook destination, two price ids | Wrong secret = every webhook 401s = no customer is ever granted access |
+| `SEND_ENABLED` | `RESEND_API_KEY` + a verified sending domain | On without the key: the batch claims `send_log` rows and delivers nothing |
+
+### What has never been exercised, and cannot be from here
+
+**There is no Paddle account and nothing is deployed**, so no sandbox transaction has ever
+been created, no webhook has ever been delivered by Paddle, and no email has ever arrived
+in a real inbox. Everything below the provider boundary is proven; the boundary itself is
+not. The signature scheme is implemented to Paddle's documented spec
+(`HMAC-SHA256` over `f"{ts}:{raw_body}"`, header `ts=…;h1=…`) and every test computes its
+signatures locally to that scheme — which proves the verifier, not the format.
+
+**The first live test to run, in this order:** create the sandbox account → set the
+notification destination and copy the *destination* secret (not the API key) → replay one
+sandbox `subscription.created` → confirm a `subscriptions` row → then, and only then,
+`SEND_ENABLED=true` with a single address on the list.
+
+### Still open after Stage B
+
+- **The LLM writer is still wired to nothing.** A paying customer would receive the
+  deterministic stub. This is the last product gap, and it is gated on prompt iteration,
+  not on engineering (layer4 §8; `/admin/inspect` renders real payloads at zero spend).
+- **Double opt-in** for signups (AUDIT §D5 / priority 2) is not built. The rate limit
+  bounds the mail cannon; it does not close it.
+- **Nothing schedules the send batch.** `run_batch` is reachable only via
+  `POST /api/admin/send`. Wiring it to the GitHub Actions cron is a deploy decision — and
+  doing it while `RUN_SCHEDULER=true` would mail every customer twice.
+- **`next@14.2.35`** — unchanged from §8, and now one major further behind whatever ships
+  next.

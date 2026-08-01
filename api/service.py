@@ -14,14 +14,18 @@ from sqlalchemy import func, select
 
 from fpl.db import SessionLocal
 from fpl.models import (
-    Brief, DraftSquad, EmailSignup, EpScore, EuropeanWeek, Player, TeamNote,
+    Brief, DraftSquad, EmailSignup, EpScore, EuropeanWeek, Player, SendLog,
+    Subscription, TeamNote,
 )
+from . import billing, tokens
+from .config import settings
 from fpl.sync import derive_mode, next_gameweek, sync_fpl
 from graph.cache import get_or_generate
 from graph.config import MAX_PER_CLUB, POSITION_QUOTA, SQUAD_BUDGET, SQUAD_SIZE
 from graph.data import load_teams
 from graph.deps import Deps
 from graph.nodes.squad_analyst import resolve_squad
+from graph.nodes.writer import STUB_MODEL
 from graph.sections import PREVIEW_HEADERS, gate_sections, split_sections
 from graph.state import BriefState, RequestCtx
 from writer.generic import render_generic_stub
@@ -46,13 +50,21 @@ def iso_utc(dt: datetime | None) -> str | None:
         return None
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).isoformat()
 
-# Stage A ships no paywall: every brief returns in full with `locked_sections: []`
-# (layer5 §6). The GATING MECHANISM is built and proven fail-closed
-# (`graph.sections.gate_sections` + tests/test_sections.py) so the Stage B flip is
-# a one-line change here — replace this constant with the PAYWALL_ENABLED env
-# setting. Do NOT reintroduce per-route gating logic; it lives in one function on
-# purpose, because the allow-list is only auditable in one place.
-PAYWALL = False
+# THE PAYWALL FLIP (Stage B, 2026-08-01). Was a `False` constant through Stage A;
+# it is now the `PAYWALL_ENABLED` env flag, which is the whole change the spec §6
+# flip asked for — "no code change" from here on.
+#
+# Gating itself did NOT move and must never move: it is `graph.sections.gate_sections`
+# and nothing else. Do NOT reintroduce per-route gating logic; the allow-list is
+# only auditable if there is exactly one of it.
+#
+# Read through `paywall_on()` rather than at import time, so a test (and the
+# operator) can flip the setting without reimporting the module.
+# The Stage A `PAYWALL` constant is deliberately GONE rather than aliased: a module
+# constant cannot track an env flag, and a name that looks like the old one while
+# silently reading a stale value is the worst of both.
+def paywall_on() -> bool:
+    return settings.paywall_enabled
 
 
 # --- FastAPI dependency ----------------------------------------------------
@@ -179,7 +191,10 @@ def _shape(deps: Deps, state: BriefState, final: BriefState, cached: bool) -> di
         squad, _ = resolve_squad(state, deps)
     with deps.session_factory() as session:
         brief_id = _brief_id(session, state.request)
-    sections, locked = gate_sections(split_sections(final.brief_md), paywall=PAYWALL)
+    # Spec §1.1: this route returns the FREE view. Full sections are never served
+    # here — the full view is §1.2 with a minted token.
+    sections, locked = gate_sections(split_sections(final.brief_md),
+                                     paywall=paywall_on())
     return {
         "brief_id": brief_id,
         "draft_id": str(state.request.draft_id) if state.request.draft_id else None,
@@ -218,19 +233,37 @@ def brief_from_draft(deps: Deps, draft_id: uuid.UUID, *, before_generate=None) -
     return generate_brief(deps, _preseason_state(draft_id), before_generate=before_generate)
 
 
-def get_team_brief(deps: Deps, team_id: int, gw: int) -> dict | None:
-    """Read an already-persisted season brief (§1.2 free view). None if absent.
+def get_team_brief(deps: Deps, team_id: int, gw: int,
+                   token: str | None = None) -> dict | None:
+    """Read an already-persisted season brief (§1.2). None if absent.
 
-    Stage A never generates season briefs, so this is a pure read — no live client,
-    no header enrichment (rank/bank come from the send job's squad ctx in Stage B).
+    `token` is the full-view JWT minted by the send job / checkout handler. Two
+    independent conditions must BOTH hold for the paid view, and the redundancy is
+    deliberate:
+
+    1. **The token verifies and names this team.** A token for team A must not open
+       team B's brief, so the claim is compared, not merely present.
+    2. **A subscription for this team is currently entitled.** Re-read from the DB,
+       not inferred from the token. This is what makes a refund or chargeback take
+       effect *immediately* (audit §D6) rather than at token expiry — the two agree
+       in the normal case because `exp` is `current_period_end`, and this check is
+       what covers the abnormal one.
+
+    Either condition failing degrades to the free view. It never errors: §1.2's
+    contract is "no/invalid token -> free view", and telling a caller why their
+    token failed is free help for forging a better one.
     """
+    claimed_team = tokens.team_id_if_valid(token)
     with deps.session_factory() as session:
         row = session.scalars(
             select(Brief).where(Brief.fpl_team_id == team_id, Brief.gameweek == gw)
         ).first()
         if row is None:
             return None
-        sections, locked = gate_sections(split_sections(row.brief_md), paywall=PAYWALL)
+        full = (claimed_team == team_id
+                and billing.entitled_for_team(session, team_id))
+        sections, locked = gate_sections(split_sections(row.brief_md),
+                                         paywall=paywall_on() and not full)
         return {
             "brief_id": row.id,
             "gameweek": row.gameweek,
@@ -264,6 +297,49 @@ def players_list(deps: Deps) -> list[dict]:
             }
             for p in rows
         ]
+
+
+def persist_generic_preview(deps: Deps, gameweek: int | None = None) -> dict:
+    """Generate and persist THE generic preview for a gameweek (Layer 4 §6).
+
+    The send job's free template has no other content source (`send._send_free`),
+    and the preview route regenerates on every call — so without a persisted row,
+    every free recipient would either get nothing or get a separately-generated
+    brief, and "the weekly preview" would not be one artifact.
+
+    Singleton by construction: `uq_brief_generic` is a unique index on `gameweek`
+    where both owner columns are NULL (migration b2c3d4e5f6a7). Re-running for the
+    same gameweek UPDATES that row rather than inserting a second one, so a rerun
+    of the batch refreshes the preview instead of failing on the constraint.
+    """
+    md = render_generic_stub(deps, gameweek)
+    gw = gameweek
+    if gw is None:
+        first = md.splitlines()[0] if md else ""
+        gw = int("".join(c for c in first if c.isdigit()) or 0)
+
+    with deps.session_factory() as session, session.begin():
+        row = session.scalars(
+            select(Brief).where(Brief.fpl_team_id.is_(None),
+                                Brief.draft_id.is_(None),
+                                Brief.gameweek == gw)).first()
+        if row is None:
+            row = Brief(fpl_team_id=None, draft_id=None, gameweek=gw, brief_md=md,
+                        # The generic preview is not squad-derived, so it has no
+                        # input hash in the §4 sense. Namespaced so it can never
+                        # collide with a real cache key and get served as one.
+                        input_hash=f"generic:{gw}",
+                        model=STUB_MODEL, tokens_in=0, tokens_out=0)
+            session.add(row)
+            created = True
+        else:
+            row.brief_md = md
+            row.model = STUB_MODEL
+            created = False
+        session.flush()
+        brief_id = row.id
+    return {"brief_id": brief_id, "gameweek": gw, "created": created,
+            "sections": list(split_sections(md, PREVIEW_HEADERS))}
 
 
 def preview(deps: Deps, gameweek: int | None = None) -> dict:
@@ -333,6 +409,77 @@ def signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> N
             row.fpl_team_id = team_id
         if row.source is None and source is not None:
             row.source = source
+
+
+# --- mail consent (§1.8) ---------------------------------------------------
+#
+# UNSUBSCRIBE AND DELETE ARE DIFFERENT ACTIONS AND MUST STAY DIFFERENT.
+#
+# Unsubscribe is a MAIL preference and leaves a tombstone; delete removes the row.
+# Two reasons the tombstone is not an over-complication:
+#
+#   1. Without a row, the next signup-form submission or list re-import silently
+#      re-adds someone who asked to leave. The tombstone is what makes "no" stick.
+#   2. `email_signups.tier` is NOT entitlement (that is `subscriptions`, see
+#      api/billing.py), so a paying subscriber who stops the email keeps every bit
+#      of the product they paid for — the web view, the token links, the billing
+#      relationship. Deleting the row on unsubscribe would conflate the two and
+#      cancel a service they are still paying for.
+
+def unsubscribe(deps: Deps, email: str) -> bool:
+    """Stop mail for `email`. Idempotent. True if a row was found.
+
+    Deliberately returns the same shape whether or not the address was on the list:
+    the route answers identically either way, so the endpoint is not an oracle for
+    "is this person a customer".
+    """
+    email = email.strip().lower()
+    with deps.session_factory() as session, session.begin():
+        row = session.get(EmailSignup, email)
+        if row is None:
+            return False
+        if row.unsubscribed_at is None:
+            row.unsubscribed_at = datetime.now(timezone.utc)
+        return True
+
+
+def resubscribe(deps: Deps, email: str) -> bool:
+    """Clear the tombstone — the "actually, keep sending" button on the landing page."""
+    email = email.strip().lower()
+    with deps.session_factory() as session, session.begin():
+        row = session.get(EmailSignup, email)
+        if row is None:
+            return False
+        row.unsubscribed_at = None
+        return True
+
+
+def delete_signup(deps: Deps, email: str) -> dict:
+    """Erase the mailing-list row outright ("delete my data").
+
+    Returns what was removed and what deliberately was not. Subscriptions are NOT
+    deleted: they are the record of a financial transaction, which we are required
+    to keep and which the payment provider holds anyway. The row is anonymised
+    instead — the email is cleared so it cannot be mailed or looked up, and the
+    billing history survives for accounting.
+    """
+    email = email.strip().lower()
+    with deps.session_factory() as session, session.begin():
+        row = session.get(EmailSignup, email)
+        removed = row is not None
+        if row is not None:
+            session.delete(row)
+        subs = session.scalars(
+            select(Subscription).where(Subscription.email == email)).all()
+        for sub in subs:
+            sub.email = ""            # anonymised, not deleted — see docstring
+        # Send history keyed by the address goes too; it exists to stop duplicate
+        # sends, and there will be no more sends.
+        logs = session.scalars(select(SendLog).where(SendLog.email == email)).all()
+        for entry in logs:
+            session.delete(entry)
+        return {"signup_removed": removed, "subscriptions_anonymised": len(subs),
+                "send_log_rows_removed": len(logs)}
 
 
 # --- curated-table writes --------------------------------------------------

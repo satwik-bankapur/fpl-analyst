@@ -75,6 +75,42 @@ export function getDraftBrief(draftId: string): Promise<Brief> {
   return fetch(`${API}/api/brief/draft/${draftId}`, { cache: "no-store" }).then(json<Brief>);
 }
 
+// `token` is the JWT minted by the send job. Absent or expired, the API answers
+// with the free sections and populates locked_sections — it never 401s, so the
+// page renders either way and the lock cards do the explaining.
+export function getTeamBrief(teamId: number, gw: number, token?: string | null): Promise<Brief> {
+  const q = token ? `?token=${encodeURIComponent(token)}` : "";
+  return fetch(`${API}/api/brief/${teamId}/${gw}${q}`, { cache: "no-store" }).then(json<Brief>);
+}
+
+// Sends a PLAN NAME. There is deliberately no price field to send — the server
+// resolves what a plan costs (api/billing.price_id_for_plan), so nothing the
+// browser can edit changes what the customer pays.
+export function postCheckout(
+  plan: "monthly" | "season",
+  email: string,
+  teamId?: number | null
+): Promise<{ checkout_url: string }> {
+  return fetch(`${API}/api/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan, email, team_id: teamId ?? null }),
+  }).then(json<{ checkout_url: string }>);
+}
+
+// The mail-consent routes take `e`/`t` as QUERY params, not a body: the same
+// URLs have to work as a bare link in an email client with no JavaScript.
+export function postMailConsent(
+  action: "unsubscribe" | "resubscribe" | "delete",
+  e: string,
+  t: string
+): Promise<{ ok: boolean; status?: string }> {
+  const q = `?e=${encodeURIComponent(e)}&t=${encodeURIComponent(t)}`;
+  return fetch(`${API}/api/email/${action}${q}`, { method: "POST" }).then(
+    json<{ ok: boolean; status?: string }>
+  );
+}
+
 // `source` tags where the address was captured (landing hero, brief footer, …)
 // so signup volume can be attributed per surface. The backend takes any string.
 export function postSignup(email: string, teamId?: number | null, source = "landing"): Promise<{ ok: boolean }> {

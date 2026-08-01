@@ -289,6 +289,112 @@ class EmailSignup(Base):
     tier: Mapped[str] = mapped_column(Text, default="free")  # 'free' / 'paid'
     source: Mapped[str | None] = mapped_column(Text, nullable=True)  # acquisition tracking
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # MAIL consent, not billing state. Set by the one-click unsubscribe (§1.8).
+    # A TOMBSTONE, not a delete: without the row, the next signup form submission or
+    # CSV re-import silently re-adds someone who asked to leave. The delete path
+    # (§1.8, "delete my data") is the one that removes the row, and it is a
+    # different, deliberate action.
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+
+class Subscription(Base):
+    """Paid access (spec §1.10). WRITTEN ONLY BY THE VERIFIED WEBHOOK HANDLER.
+
+    This table — not `email_signups.tier` — is the source of truth for entitlement.
+    `tier` is reachable from the public unauthenticated signup route, so deriving
+    paid access from it would let a caller grant themselves the paid product (the
+    2026-08-01 audit found `service.signup` doing exactly the reverse, silently
+    demoting people). Entitlement asks `billing.is_entitled`, which reads here.
+    """
+
+    __tablename__ = "subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(Text, index=True)
+    fpl_team_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(Text, default="paddle")
+    # Unique so a redelivered `subscription.created` updates rather than duplicates.
+    # For the one-time season pass there is no Paddle subscription, so this holds
+    # the transaction id prefixed `txn:` — see api/billing.py.
+    provider_subscription_id: Mapped[str] = mapped_column(Text, unique=True)
+    provider_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plan: Mapped[str] = mapped_column(Text)                    # 'monthly' / 'season'
+    # Free text from Paddle ON PURPOSE — never an enum. A status this code has never
+    # heard of must be storable so it can be seen, and must not be entitled. The
+    # allow-list in api/billing.ENTITLED_STATUSES decides; the column just records.
+    status: Mapped[str] = mapped_column(Text)
+    current_period_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class WebhookEvent(Base):
+    """Processed provider events (spec §1.10). The PK IS the idempotency mechanism.
+
+    Paddle redelivers on timeout or 5xx, so a duplicate `subscription.created` must
+    not grant twice or mail twice. The handler INSERTs here inside the same
+    transaction as the state change; a PK violation means "already processed" ->
+    return 200 and do nothing. Do NOT replace this with a `SELECT ... if not exists`
+    check, which races against a concurrent redelivery.
+    """
+
+    __tablename__ = "webhook_events"
+
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text)
+    occurred_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The verified payload, kept for billing disputes. Contains the customer email,
+    # so it inherits the retention policy of `email_signups`, not of `briefs`.
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class SendLog(Base):
+    """One row per (recipient, gameweek, template) — the send batch's idempotency key.
+
+    Inserted BEFORE the provider call, not after: a crash between call and record
+    would otherwise re-send on the next run, and a duplicate email to a paying
+    customer is worse than a missing one we can retry deliberately.
+    """
+
+    __tablename__ = "send_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(Text)
+    gameweek: Mapped[int] = mapped_column(Integer)
+    template: Mapped[str] = mapped_column(Text)      # 'paid_brief' / 'free_preview'
+    status: Mapped[str] = mapped_column(Text)        # 'sent' / 'failed' / 'skipped'
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("uq_send_log_recipient", "email", "gameweek", "template", unique=True),
+    )
+
+
+class RateHit(Base):
+    """Fixed-window counter for the DB-backed rate limiter (audit §C2).
+
+    Replaces the in-process dict, which reset on every Render wake and so bounded
+    nothing in production. `bucket` is an IP for the per-caller limits and the
+    literal 'global' for the whole-service generation cap.
+
+    # ponytail: fixed window, not sliding — a caller can burst across a boundary and
+    # briefly get 2x. That is the right trade for an abuse ceiling; make it sliding
+    # only if the burst itself becomes the problem.
+    """
+
+    __tablename__ = "rate_hits"
+
+    bucket: Mapped[str] = mapped_column(Text, primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Meta(Base):

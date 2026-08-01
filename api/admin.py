@@ -14,13 +14,15 @@ from __future__ import annotations
 from sqlalchemy import func, select
 
 from fpl.models import (
-    Brief, EmailSignup, EpScore, EuropeanWeek, Fixture, Player, PlayerArchive, TeamNote,
+    Brief, EmailSignup, EpScore, EuropeanWeek, Fixture, Player, PlayerArchive,
+    SendLog, Subscription, TeamNote, WebhookEvent,
 )
 from fpl.sync import derive_mode, next_gameweek
 from graph.data import load_fixtures, load_teams, resolve_ep_anchor
 from graph.deps import Deps
 from graph.fixtures_util import swing_score, team_next_fixtures
 
+from . import mail
 from .service import iso_utc
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -101,6 +103,58 @@ def overview(deps: Deps) -> dict:
         # The club list every other admin page needs (fixture picker, euro-week
         # rows). Twenty rows of three fields — cheaper than a second endpoint.
         "teams": sorted(teams.values(), key=lambda t: t["short_name"]),
+    }
+
+
+def subscriptions(deps: Deps) -> dict:
+    """Billing rows with the entitlement VERDICT alongside the raw status.
+
+    The verdict comes from `billing.is_entitled` — the same function the paywall
+    calls — rather than being recomputed here. A dashboard that re-derives "is this
+    person paid" is a second gating implementation, which is the thing docs/CLAUDE.md
+    forbids for section keys and which is no better an idea for billing.
+    """
+    from api import billing
+
+    with deps.session_factory() as session:
+        rows = session.scalars(
+            select(Subscription).order_by(Subscription.created_at.desc())).all()
+        out = [
+            {
+                "id": s.id,
+                # Masked: this page is an operator console, not a mailing list
+                # export, and full addresses on screen are a shoulder-surfing and
+                # screenshot risk for no diagnostic gain.
+                "email": mail.mask(s.email) if s.email else "(anonymised)",
+                "fpl_team_id": s.fpl_team_id,
+                "plan": s.plan,
+                "status": s.status,
+                "entitled": billing.is_entitled(s),
+                "current_period_end": iso_utc(s.current_period_end),
+                "provider_subscription_id": s.provider_subscription_id,
+                "created_at": iso_utc(s.created_at),
+            }
+            for s in rows
+        ]
+        recent_events = [
+            {"event_id": w.event_id, "event_type": w.event_type,
+             "processed_at": iso_utc(w.processed_at)}
+            for w in session.scalars(
+                select(WebhookEvent).order_by(WebhookEvent.processed_at.desc()).limit(20))
+        ]
+        sends = [
+            {"gameweek": s.gameweek, "template": s.template, "status": s.status,
+             "email": mail.mask(s.email), "attempts": s.attempts,
+             "error": s.error, "created_at": iso_utc(s.created_at)}
+            for s in session.scalars(
+                select(SendLog).order_by(SendLog.created_at.desc()).limit(50))
+        ]
+
+    return {
+        "subscriptions": out,
+        "entitled_count": sum(1 for s in out if s["entitled"]),
+        "recent_events": recent_events,
+        "recent_sends": sends,
     }
 
 

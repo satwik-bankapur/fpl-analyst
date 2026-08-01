@@ -30,7 +30,16 @@ function toRuns(keys: string[], locked: string[]): Run[] {
 
 const words = (s: string) => s.trim().split(/\s+/).length;
 
-export default function BriefView({ brief }: { brief: Brief }) {
+// `teamId` is only ever known on the season-brief route (/brief/[teamId]); the
+// draft route has no team yet and LockCard asks for one. It is not on `Brief`
+// because the API response deliberately doesn't echo it back.
+export default function BriefView({
+  brief,
+  teamId,
+}: {
+  brief: Brief;
+  teamId?: number | null;
+}) {
   const keys = Array.from(
     new Set([...SECTION_ORDER, ...Object.keys(brief.sections), ...brief.locked_sections])
   ).filter((k) => k in brief.sections || brief.locked_sections.includes(k));
@@ -83,6 +92,7 @@ export default function BriefView({ brief }: { brief: Brief }) {
             <LockCard
               key={`locked-${run.keys.join("-")}`}
               titles={run.keys.map(sectionTitle)}
+              teamId={teamId}
             />
           )
         )}
