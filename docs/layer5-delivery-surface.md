@@ -194,6 +194,119 @@ Definition of done (Layer 5 overall): Stage A live on real domains; a sandbox Pa
 Dated corrections/extensions from the Stage A build. The spec above is the intent;
 these record where the code diverges and why.
 
+**2026-08-01 — Stage B built: billing, tokens, the paywall flip and the weekly send.**
+
+Everything in this note ships **off**: `PAYWALL_ENABLED=false`, `SEND_ENABLED=false`, no
+Paddle credentials. The code exists and is tested (`tests/test_stage_b.py`, 104 tests); the
+switches are separate from the build on purpose.
+
+- **Tables (§1.10).** `subscriptions`, `webhook_events`, `send_log`, `rate_hits`, plus
+  `email_signups.unsubscribed_at`. Migration `d4e5f6a7b8c9`, additive only (CREATE TABLE /
+  ADD COLUMN nullable), so it is safe against a populated DB.
+  - **`subscriptions.status` is free text, never an enum.** Paddle can invent a status
+    tomorrow; a DB enum would make the webhook 500 on it, and a 500 makes Paddle retry
+    forever. Storing the unknown string and letting the allow-list refuse it degrades to
+    free, which is the correct failure.
+  - **`webhook_events.event_id` is the PRIMARY KEY.** That *is* the idempotency mechanism —
+    the insert happens in the same transaction as the state change, so a concurrent
+    redelivery loses on the PK rather than on a SELECT-then-INSERT race the code would have
+    to win.
+
+- **§1.7 webhook — verify, then parse, then apply once (audit §D1).** The route signature is
+  `async def paddle_webhook(request: Request, ...)`, **not** a pydantic body model. That is
+  the verify-before-parse requirement expressed as code: declaring a model would have FastAPI
+  deserialize attacker-controlled JSON before the handler runs.
+  `tests/test_stage_b.py::test_signature_is_verified_before_the_body_is_parsed` asserts the
+  call ORDER, not the 401, because a handler that parsed first and checked afterwards would
+  still return 401.
+  - Rejection is **401 with no detail**. Telling a caller whether the timestamp or the HMAC
+    was wrong is free help for the next attempt.
+  - An empty `PADDLE_WEBHOOK_SECRET` rejects everything (fail closed), the same rule as
+    `ADMIN_TOKEN`. `api/main._check_stage_b_config` logs a loud warning when the paywall is on
+    and the secret is empty, because in that state nothing can ever unlock.
+  - **Plan and price are read only from the verified payload.** The client sends a plan NAME;
+    `billing.price_id_for_plan` resolves it server-side. There is no price, amount or price-id
+    field on `CheckoutRequest` — the tamper-proofing is a schema, not a validation rule
+    someone can forget to run.
+
+- **Entitlement is an ALLOW-LIST**, mirroring the `FREE_SECTIONS` property that
+  `docs/CLAUDE.md` already makes load-bearing:
+  `ENTITLED_STATUSES = {"active", "trialing"}`. Any other status — `past_due`, `paused`,
+  `"ACTIVE"`, `"active "`, or a status Paddle ships next year — degrades to free.
+  - **`canceled` is the one exception, and it grants MORE, not less.** A refund or chargeback
+    arrives as a cancellation; delivery continues to `current_period_end` and never cuts off
+    mid-period. A canceled subscription with no period, or a period already past, is not
+    entitled.
+
+- **§1.2 full view.** `?token=` is accepted again (the 2026-07-30 note above, which says it was
+  removed, is superseded). Unlocking needs **both** a valid token naming that team **and** a
+  live entitlement check against `subscriptions` — the token is not the authority, it is a
+  pointer at a row that is re-read on every request. Revoking a subscription therefore takes
+  effect immediately, without invalidating anything.
+
+- **`api/tokens.py` is stdlib HS256 with no algorithm dispatch.** There is no `alg` lookup
+  table to confuse: the verifier recomputes an HS256 MAC and compares it with
+  `hmac.compare_digest`, so `alg: none` and `alg: RS256` are unrepresentable rather than
+  merely rejected. `exp` is REQUIRED (a token without one does not verify).
+  `BRIEF_TOKEN_SECRET_PREV` gives a rotation overlap so links already sitting in inboxes keep
+  working. Minimum 32 characters, enforced at **startup** — with the paywall or the send job
+  on, a weak secret makes the app refuse to boot.
+  - **Leaked-token blast radius.** A leaked token grants read access to the paid sections of
+    **one team's brief**, for that team only, until `exp` — which equals
+    `current_period_end`. It is not a session: it carries no identity, cannot be presented to
+    any other route, cannot be extended or refreshed, and confers nothing over billing, mail
+    consent or the admin surface. It cannot be revoked individually; the containments are its
+    short life, its single-team scope, and the live entitlement re-check (cancel the
+    subscription and every token for it stops working at once). Rotating
+    `BRIEF_TOKEN_SECRET` invalidates every outstanding token — the blunt instrument, for a
+    secret compromise rather than a single leak. **Do not add claims to this token.** Its
+    safety comes from how little it says.
+
+- **§3 send batch (`api/send.py`).** Per-recipient failure isolation (a broad `except
+  Exception` around one delivery IS the boundary — a narrower one would let an unexpected
+  type end the batch), idempotent via a unique `(email, gameweek, template)` claim taken
+  **before** the provider call and committed on its own, one retry at +1h, a whole-batch
+  ceiling, both templates with plaintext alternatives, and RFC 8058 one-click
+  `List-Unsubscribe` on every send. **Addresses are hashed in every log line**
+  (`mail.mask` → `sha256(email)[:12]@domain`).
+  - **Two unsubscribe URLs, deliberately.** The `List-Unsubscribe` **header** points at
+    `PUBLIC_API_URL` + `POST /api/email/unsubscribe` because a mail client POSTs it with no
+    human, no JavaScript and no cookie; the **visible footer link** points at
+    `PUBLIC_WEB_URL` + `/unsubscribe`, a page that acts on load and then offers undo and
+    delete. The page is the courtesy path — it could 500 and unsubscribing would still work.
+
+- **§1.8 unsubscribe is a TOMBSTONE (`email_signups.unsubscribed_at`), not `tier`.** The spec
+  writes `tier = 'unsubscribed'`, which conflates mail consent with billing state on a
+  billing-adjacent column. A paying customer who unsubscribes from email must keep their
+  subscription; that is a hard requirement, so consent got its own column. `delete` is a
+  separate action that removes the signup row and **anonymises** — not deletes — subscription
+  rows, because billing records have to be retained.
+
+- **§6 paywall flip.** `PAYWALL_ENABLED` is read by `service.paywall_on()` and gates the
+  existing `graph.sections.gate_sections` allow-list. There is no second gating
+  implementation, and `tests/test_stage_b.py::test_the_flip_uses_the_existing_allow_list_and_
+  not_a_second_implementation` asserts that structurally.
+  The former `service.PAYWALL` constant was **removed** rather than kept as an alias: a
+  familiar name that silently reads a stale value is worse than no name.
+
+- **Persisted generic preview.** The Stage A TODO below is closed:
+  `service.persist_generic_preview()` writes the singleton the free template mails from
+  (unique index `uq_brief_generic`, migration `b2c3d4e5f6a7`), so every free recipient gets
+  the *same* artifact and a re-run refreshes rather than duplicates.
+
+- **Rate limiting is now DB-backed for anything that costs money** (audit §C2). The in-process
+  dict resets on every Render wake and is per-process; `rate_hits` survives both. Three layers
+  on a generation: per-IP in-memory (cheap), per-IP durable, then a **global** circuit-breaker
+  bucket (`GLOBAL_GENERATION_LIMIT`) that caps the whole service's bill if the per-IP limit
+  has a bug. Old windows are swept on `POST /api/admin/sync`.
+
+- **What is NOT built.** The LLM writer is still wired to nothing (gated on prompt iteration,
+  layer4 §8) — every brief a paying customer would receive is still the deterministic stub.
+  Double opt-in for signups is still open (audit priority 2). No Paddle account exists, so the
+  live checkout URL and a real webhook delivery have never been exercised against Paddle
+  itself; the signature scheme is implemented to spec and tested with locally computed
+  signatures.
+
 **2026-07-30 — `POST /api/brief` now validates the squad server-side.**
 
 - The draft path accepted whatever squad it was given. Position caps, the £100.0m budget and the 3-per-club rule existed only in the picker, which is a courtesy to the user and not a control — `curl` bypassed all of them, and a nonsense squad produced a nonsense brief on a **public, unauthenticated** endpoint.

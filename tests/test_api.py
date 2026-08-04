@@ -1094,8 +1094,10 @@ def test_every_admin_route_rejects_an_anonymous_caller(golden_sf, client_for,
                 checked.append(f"{method} {path}")
 
         # A guard on the guard: if the walk matches nothing, every assertion above
-        # passes vacuously.
-        assert len(checked) >= 15, checked
+        # passes vacuously. Raised 15 -> 18 when Stage B added /admin/preview,
+        # /admin/send and /admin/subscriptions (2026-08-01). Raise it whenever the
+        # surface grows — that is the point of the number.
+        assert len(checked) >= 18, checked
     finally:
         admin_limiter.limit = settings.admin_fail_limit
 

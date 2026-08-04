@@ -10,20 +10,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current implementation state
 
-*Verified against the tree on 2026-07-30. This section was wrong for months — it claimed
+*Verified against the tree on 2026-08-01. This section was wrong for months — it claimed
 Layers 3–5 were spec-only long after they shipped. If you change a layer's status, change
 it here in the same commit.*
 
 **All five layers exist as code and are merged into `main`.** Stage A of Layer 5 is
-complete; Stage B (payments) is not started.
+complete. **Stage B (payments) is built on branch `stage-b` and ships switched OFF** —
+`PAYWALL_ENABLED=false`, `SEND_ENABLED=false`, no Paddle credentials, no Paddle account.
 
 - `fpl/` — Layer 1: FPL API client, SQLAlchemy models (13 tables), Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
 - `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`), `config_version` v1.4.
 - `graph/` — Layer 3: real LangGraph `StateGraph`, 5 deterministic nodes + a **template stub Writer**. Owns `graph/sections.py`, the canonical section vocabulary.
 - `writer/` — Layer 4: LLM writer, §7 validator, payload serializer, generic preview renderer. **Built and tested, but NOT in the serving path** — see below.
-- `api/` — Layer 5 Stage A: FastAPI, 23 routes (12 public + the token-gated `/api/admin/*`
-  operator surface). No checkout, webhooks, sends, or paywall.
-- `web/` — Layer 5 Stage A: Next.js frontend, 10 routes (5 public, re-skinned to the Scout
+- `api/` — Layer 5: FastAPI, 32 routes (14 public + the 18-operation token-gated
+  `/api/admin/*` operator surface). Stage B added `api/billing.py`, `api/tokens.py`,
+  `api/send.py` and `writer/emails.py`.
+- `web/` — Layer 5: Next.js frontend, 12 routes (7 public, re-skinned to the Scout
   Report design; 5 under `/admin`, token-gated and `noindex`).
 
 ### Current serving reality (read before you promise anything)
@@ -47,11 +49,21 @@ The gap between what this repo *looks* like it does and what it does:
   zero spend. It also traces the pipeline's reasoning and diffs free vs paid; see
   `graph/trace.py`, `api/inspect.py` and `docs/STATUS.md` §6. Trace mode is off by default
   and must never change a brief (`tests/test_trace.py`).
-- **No payments exist.** No checkout route, no webhook route, no `subscriptions` or
-  `webhook_events` tables, no Paddle account, no `PAYWALL_ENABLED`.
-- **The paywall mechanism exists and is proven fail-closed**, but is switched off:
-  `api/service.PAYWALL` is a `False` constant and every response carries
-  `locked_sections: []`. Flipping it is one line; see `graph/sections.py`.
+- **The payment machinery exists but has never met Paddle.** Checkout, the signed
+  webhook, `subscriptions` / `webhook_events` / `send_log` / `rate_hits`, JWT full-view
+  links and the weekly send batch are all built and covered by `tests/test_stage_b.py`.
+  There is still **no Paddle account**, so the live checkout URL and a real webhook
+  delivery have never been exercised against Paddle itself — every signature in the test
+  suite is computed locally to Paddle's documented scheme. Do not describe the product as
+  taking money until a sandbox transaction has actually landed.
+- **The paywall is switched off, not absent.** `PAYWALL_ENABLED` defaults false, so every
+  response still carries `locked_sections: []`. Gating itself is `graph.sections`'
+  allow-list and lives nowhere else — `service.paywall_on()` only decides whether it runs.
+  (The old `service.PAYWALL` constant is gone; there is no back-compat alias, because a
+  familiar name that silently reads a stale value is worse than no name.)
+- **`SEND_ENABLED` is off and no scheduler drives the batch.** `api/send.run_batch` is
+  reachable only through `POST /api/admin/send` today; wiring it to a cron is a deploy
+  decision, and doing it while `RUN_SCHEDULER=true` would mail every customer twice.
 - **Nothing is deployed.** `render.yaml` and `.env.example` describe the launch topology;
   no service has been created.
 
@@ -91,6 +103,16 @@ The repo ships a working `.venv/` (Python 3.13). Use its interpreter explicitly.
 .venv/Scripts/python -m fpl sync      # fetch LIVE API, score, write ep_scores
 .venv/Scripts/python -m fpl mode      # print derived mode + next GW
 .venv/Scripts/python -m fpl run       # start in-process scheduler (blocks forever)
+
+# A NEW DATABASE NEEDS THIS TOO — pre-season, init-db + sync alone is not enough.
+# A fresh DB has an empty players_archive, and pre-season scoring has nothing else
+# to run on: every ep collapses onto the (position, price-band) baseline, so the
+# top 20 is ALL GOALKEEPERS and the recommended captain is a keeper. Nothing errors.
+# Verified on a fresh clone 2026-08-01: top 10 were 10 keepers on two distinct EPs.
+.venv/Scripts/python -m fpl backfill-archive \
+    --season 2025-26 --from tests/assets/bootstrap_2025-26.json
+.venv/Scripts/python -m fpl sync      # re-score through the now-populated archive
+# Verify: 841 archive rows, match_method mostly `name_position`, top 20 a position mix.
 ```
 
 There is no lint/format tool configured — do not invent one.
