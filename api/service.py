@@ -10,14 +10,14 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from fpl.db import SessionLocal
 from fpl.models import (
-    Brief, DraftSquad, EmailSignup, EpScore, EuropeanWeek, Player, SendLog,
-    Subscription, TeamNote,
+    Account, Brief, DraftSquad, EmailSignup, EpScore, EuropeanWeek, Player,
+    SendLog, Subscription, TeamNote,
 )
-from . import billing, tokens
+from . import accounts, billing, tokens
 from .config import settings
 from fpl.sync import derive_mode, next_gameweek, sync_fpl
 from graph.cache import get_or_generate
@@ -233,35 +233,67 @@ def brief_from_draft(deps: Deps, draft_id: uuid.UUID, *, before_generate=None) -
     return generate_brief(deps, _preseason_state(draft_id), before_generate=before_generate)
 
 
-def get_team_brief(deps: Deps, team_id: int, gw: int,
-                   token: str | None = None) -> dict | None:
-    """Read an already-persisted season brief (§1.2). None if absent.
+def account_from_link_token(deps: Deps, token: str | None, team_id: int) -> int | None:
+    """A full-view JWT -> the account id it belongs to, or None. Never raises.
 
-    `token` is the full-view JWT minted by the send job / checkout handler. Two
-    independent conditions must BOTH hold for the paid view, and the redundancy is
-    deliberate:
+    THE EMAILED LINK IS NO LONGER A GRANT; IT IS A POINTER AT AN ACCOUNT
+    (accounts build, 2026-08-04). Three things must all hold:
 
-    1. **The token verifies and names this team.** A token for team A must not open
-       team B's brief, so the claim is compared, not merely present.
-    2. **A subscription for this team is currently entitled.** Re-read from the DB,
-       not inferred from the token. This is what makes a refund or chargeback take
-       effect *immediately* (audit §D6) rather than at token expiry — the two agree
-       in the normal case because `exp` is `current_period_end`, and this check is
-       what covers the abnormal one.
+    1. The token verifies and its `team_id` claim names THIS team — unchanged, and
+       still what stops a token for team A opening team B.
+    2. Its `sub` claim resolves to a real subscription.
+    3. That subscription is LINKED TO AN ACCOUNT.
 
-    Either condition failing degrades to the free view. It never errors: §1.2's
-    contract is "no/invalid token -> free view", and telling a caller why their
-    token failed is free help for forging a better one.
+    (3) is the new one and it is the point: a token forwarded to someone with no
+    account, or minted against a subscription the webhook never managed to link,
+    resolves to nothing and opens nothing. The route exchanges the result for a
+    session, so the token stops being a standing credential and becomes a one-time
+    introduction — after which every subsequent request is gated by the session,
+    and revoking the subscription takes effect on the next read either way.
+
+    Entitlement is NOT decided here; `get_team_brief` re-reads it from the account.
     """
     claimed_team = tokens.team_id_if_valid(token)
+    if claimed_team is None or claimed_team != team_id:
+        return None
+    claims = tokens.claims_if_valid(token)
+    if claims is None:
+        return None
+    with deps.session_factory() as session:
+        account = billing.account_for_subscription_id(session, claims.get("sub"))
+        return account.id if account is not None else None
+
+
+def get_team_brief(deps: Deps, team_id: int, gw: int,
+                   account_id: int | None = None) -> dict | None:
+    """Read an already-persisted season brief (§1.2). None if absent.
+
+    Two independent conditions must BOTH hold for the paid view, and the
+    redundancy is deliberate:
+
+    1. **A session identifies an account.** `account_id` comes from the session
+       cookie, or from a full-view link that was just exchanged for one
+       (`account_from_link_token`). Anonymous is not an error — it is the free view.
+    2. **That account has a currently-entitled subscription for this team.**
+       Re-read from the DB on every request, never inferred from the cookie. This
+       is what makes a refund or chargeback take effect *immediately* (audit §D6)
+       rather than at session expiry.
+
+    Either condition failing degrades to the free view. It never errors: §1.2's
+    contract is "no/invalid credential -> free view", and telling a caller why
+    theirs failed is free help for forging a better one.
+
+    THE FREE VIEW IS NOT A LOGIN WALL. `account_id=None` returns the brief with
+    paid sections locked — a 401 here would put a login in front of content the
+    product gives away, which the accounts build was explicitly not allowed to do.
+    """
     with deps.session_factory() as session:
         row = session.scalars(
             select(Brief).where(Brief.fpl_team_id == team_id, Brief.gameweek == gw)
         ).first()
         if row is None:
             return None
-        full = (claimed_team == team_id
-                and billing.entitled_for_team(session, team_id))
+        full = billing.entitled_for_account(session, account_id, team_id)
         sections, locked = gate_sections(split_sections(row.brief_md),
                                          paywall=paywall_on() and not full)
         return {
@@ -478,8 +510,85 @@ def delete_signup(deps: Deps, email: str) -> dict:
         logs = session.scalars(select(SendLog).where(SendLog.email == email)).all()
         for entry in logs:
             session.delete(entry)
-        return {"signup_removed": removed, "subscriptions_anonymised": len(subs),
-                "send_log_rows_removed": len(logs)}
+        result = {"signup_removed": removed, "subscriptions_anonymised": len(subs),
+                  "send_log_rows_removed": len(logs)}
+        # The account, if this address has one. Same transaction: a delete that
+        # removes the mailing-list row and leaves a live login behind is not a
+        # delete, and two transactions could fail between them.
+        account = accounts.get_account_by_email(session, email)
+        if account is not None:
+            result.update(_purge_account(session, account))
+        return result
+
+
+def _purge_account(session, account) -> dict:
+    """Remove an account and everything that hangs off it. Caller owns the transaction.
+
+    THE CASCADE, WRITTEN OUT RATHER THAN LEFT TO THE DATABASE. `sessions` has
+    `ON DELETE CASCADE` and `subscriptions.account_id` has `ON DELETE SET NULL`,
+    but SQLite does not enforce either unless `PRAGMA foreign_keys=ON`, and the
+    whole test suite runs on SQLite — so the guarantee would be asserted exactly
+    where it is not enforced. Doing it explicitly makes the behaviour identical on
+    both engines and, more importantly, makes it *readable*: what a delete destroys
+    should not require reading a migration to find out.
+
+    What survives, and why:
+
+    - **Subscription ROWS survive, unlinked and anonymised.** They are the record
+      of a financial transaction; we are required to keep them and the payment
+      provider holds them anyway. `account_id` and `email` are cleared, so the row
+      is no longer reachable from any identity and can never re-entitle anyone.
+    - **Nothing about billing is CANCELLED here.** Deleting an account does not
+      tell Paddle to stop charging a card, and pretending otherwise in a return
+      value would be the single most expensive lie this codebase could tell. The
+      route surfaces `subscription_cancel_required` so the UI says it out loud.
+    """
+    from fpl.models import MagicLinkToken
+
+    sessions_removed = accounts.destroy_sessions_for_account(session, account.id)
+    links_removed = session.execute(
+        delete(MagicLinkToken).where(MagicLinkToken.email == account.email)
+    ).rowcount or 0
+    subs = session.scalars(
+        select(Subscription).where(Subscription.account_id == account.id)).all()
+    still_paying = False
+    for sub in subs:
+        still_paying = still_paying or billing.is_entitled(sub)
+        sub.account_id = None
+        sub.email = ""
+    session.delete(account)
+    return {
+        "account_removed": True,
+        "sessions_removed": sessions_removed,
+        "magic_links_removed": links_removed,
+        "subscriptions_unlinked": len(subs),
+        # True => there is a live subscription that will KEEP BILLING until it is
+        # cancelled in Paddle. Not an incidental field; the UI must say this.
+        "subscription_cancel_required": still_paying,
+    }
+
+
+def delete_account(deps: Deps, account_id: int) -> dict:
+    """Delete the signed-in account: the row, its sessions, its links, its signup.
+
+    The session-authenticated sibling of `delete_signup`. Both end in
+    `_purge_account`, so "delete me" means the same thing whichever door it came
+    through — the mailed link deletes by address, this deletes by session.
+    """
+    with deps.session_factory() as session, session.begin():
+        account = session.get(Account, account_id)
+        if account is None:
+            return {"account_removed": False}
+        email = account.email
+        signup = session.get(EmailSignup, email)
+        if signup is not None:
+            session.delete(signup)
+        logs = session.scalars(select(SendLog).where(SendLog.email == email)).all()
+        for entry in logs:
+            session.delete(entry)
+        result = _purge_account(session, account)
+        return {"signup_removed": signup is not None,
+                "send_log_rows_removed": len(logs), **result}
 
 
 # --- curated-table writes --------------------------------------------------

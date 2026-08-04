@@ -1,7 +1,13 @@
 import Link from "next/link";
+import { AuthNav } from "./AuthNav";
 
 // Shared page chrome from the design: a thin bordered top bar and a legal
 // footer. Both appear on every screen in the mockups, so they live in one file.
+//
+// `right` defaults to the account corner (accounts build, 2026-08-04) so every
+// page gains it without being edited. A page that passes its own `right` — the
+// admin shell, for instance — opts out, which is why this is a default rather
+// than an unconditional render.
 export function SiteHeader({ right }: { right?: React.ReactNode }) {
   return (
     <header className="border-b border-line-dim">
@@ -12,7 +18,7 @@ export function SiteHeader({ right }: { right?: React.ReactNode }) {
         >
           The Scout Report
         </Link>
-        {right}
+        {right ?? <AuthNav />}
       </div>
     </header>
   );

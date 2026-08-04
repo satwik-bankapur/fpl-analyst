@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from urllib.parse import quote
 
 import httpx
 
@@ -100,6 +101,48 @@ def _welcome_html(brief_url: str | None) -> str:
         "League. Reply to this email any time.</p>"
         "</div>"
     )
+
+
+def send_magic_link(email: str, token: str, *, next_path: str = "/") -> bool:
+    """Mail a sign-in link. Never raises into the request path.
+
+    Swallowing the failure is deliberate and is the same rule `send_welcome`
+    follows: `POST /api/auth/request-link` must answer identically for every
+    address (no enumeration oracle), and an exception escaping here would make a
+    provider hiccup on one address look different from success on another.
+
+    NO `List-Unsubscribe` HEADER. This is transactional mail the recipient asked
+    for seconds ago, not bulk — putting an unsubscribe on it invites someone to
+    unsubscribe from their own ability to sign in.
+
+    The link points at the API, not the web app: it must be consumed by the route
+    that sets the session cookie, and bouncing through Next.js first would mean
+    two hops with a single-use token in the middle of them.
+    """
+    api = settings.public_api_url.rstrip("/")
+    url = f"{api}/api/auth/verify?token={token}&next={quote(next_path, safe='/')}"
+    minutes = settings.magic_link_ttl_minutes
+    html = (
+        "<div style=\"font-family:system-ui,sans-serif;max-width:520px\">"
+        "<h2>Sign in to FPL Analyst</h2>"
+        f'<p><a href="{url}">Click here to sign in →</a></p>'
+        f"<p style=\"color:#666;font-size:13px\">This link works once and expires "
+        f"in {minutes} minutes. If you didn't ask for it, ignore this email — "
+        "nobody can sign in without clicking it.</p>"
+        "</div>"
+    )
+    text = (
+        "Sign in to FPL Analyst\n\n"
+        f"{url}\n\n"
+        f"This link works once and expires in {minutes} minutes.\n"
+        "If you didn't ask for it, ignore this email."
+    )
+    try:
+        return send(to=email, subject="Your FPL Analyst sign-in link",
+                    html=html, text=text)
+    except MailError as exc:
+        log.warning("mail: magic link to %s failed: %s", mask(email), exc)
+        return False
 
 
 def send_welcome(email: str, *, brief_url: str | None = None) -> bool:

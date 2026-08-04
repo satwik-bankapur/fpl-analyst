@@ -169,3 +169,26 @@ request_limiter = RateLimiter(settings.request_rate_limit, settings.request_rate
 
 # Failed admin auth attempts. Recorded only on rejection.
 admin_limiter = RateLimiter(settings.admin_fail_limit, settings.admin_fail_window_s)
+
+# --- auth (accounts build, 2026-08-04) --------------------------------------
+#
+# ALL THREE ARE DB-BACKED, none is the in-memory kind. `POST /api/auth/request-link`
+# sends mail to an address the caller names, which makes it both a spam cannon
+# aimed at a third party and a bill aimed at us — exactly the class of endpoint
+# audit §C2 says the in-process dict does not protect, because it resets on every
+# Render wake and is per-process during a deploy.
+
+# Per-IP magic-link requests.
+auth_link_limiter = DbRateLimiter(settings.auth_link_limit, settings.auth_link_window_s)
+
+# Per-ADDRESS magic-link requests, on the same window. Separate from the per-IP
+# limiter because they stop different attacks: the per-IP one stops one host
+# enumerating many addresses, this one stops many hosts mailbombing one address —
+# a distributed sender is under the per-IP cap on every single request.
+auth_email_limiter = DbRateLimiter(settings.auth_link_per_email_limit,
+                                   settings.auth_link_window_s)
+
+# Verifications and OAuth callbacks per IP: a ceiling on token guessing. The
+# tokens are 32 random bytes, so this is depth-in-defence rather than the control.
+auth_verify_limiter = DbRateLimiter(settings.auth_verify_limit,
+                                    settings.auth_verify_window_s)

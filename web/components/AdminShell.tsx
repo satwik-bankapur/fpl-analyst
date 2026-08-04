@@ -12,6 +12,7 @@ const NAV = [
   { href: "/admin/euro-weeks", label: "European weeks" },
   { href: "/admin/fixtures", label: "Fixtures" },
   { href: "/admin/inspect", label: "Inspect" },
+  { href: "/admin/accounts", label: "Accounts" },
 ];
 
 // Token gate + nav for every /admin page. One prompt, stored locally, re-prompted

@@ -325,7 +325,10 @@ def test_the_checkout_request_schema_has_no_price_field(client):
     from api.routes import CheckoutRequest
 
     fields = set(CheckoutRequest.model_fields)
-    assert fields == {"email", "team_id", "plan"}
+    # `accept_terms` joined the model in the accounts build (2026-08-04): checkout
+    # is an account-creation path and the box is ticked on the card. It carries no
+    # pricing authority — it decides what is recorded about CONSENT, not about money.
+    assert fields == {"email", "team_id", "plan", "accept_terms"}
     for forbidden in ("price", "price_id", "amount", "currency", "discount"):
         assert forbidden not in fields
 
@@ -703,10 +706,31 @@ def test_the_flip_uses_the_existing_allow_list_and_not_a_second_implementation()
     assert "PAID_SECTIONS" not in src
 
 
+def _accept_terms(sf, email: str) -> None:
+    """Record terms acceptance for the account the webhook provisioned.
+
+    UPDATED BY THE ACCOUNTS BUILD (2026-08-04). Entitlement no longer resolves
+    from the token to the subscription; it resolves token -> account ->
+    subscription, and an account that has not accepted the current terms is
+    served the FREE view (`routes._paid_account_id`). In the real flow the box is
+    ticked on the checkout card and `POST /api/checkout` records it, so this
+    helper stands in for the step these token tests skip by posting a webhook
+    directly. It is not a workaround — without it, these tests would assert that
+    the terms gate does not work.
+    """
+    from api import accounts as acc
+
+    with sf() as s, s.begin():
+        account = acc.get_account_by_email(s, email)
+        assert account is not None, "the webhook should have provisioned an account"
+        acc.accept_terms(account)
+
+
 def test_a_valid_token_for_an_entitled_team_unlocks_everything(client, sf, monkeypatch):
     monkeypatch.setattr(settings, "paywall_enabled", True)
     _persist_team_brief(sf, 1234, 5)
     post_webhook(client, sub_event(team_id=1234))
+    _accept_terms(sf, "fan@example.com")
     with sf() as s:
         sub = s.scalars(select(Subscription)).one()
         token = tokens.mint(subscription_id=sub.id, team_id=1234,
@@ -736,6 +760,7 @@ def test_a_valid_token_stops_working_when_entitlement_ends(client, sf, monkeypat
     monkeypatch.setattr(settings, "paywall_enabled", True)
     _persist_team_brief(sf, 1234, 5)
     post_webhook(client, sub_event(team_id=1234))
+    _accept_terms(sf, "fan@example.com")
     with sf() as s:
         sub = s.scalars(select(Subscription)).one()
         token = tokens.mint(subscription_id=sub.id, team_id=1234,

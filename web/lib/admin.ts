@@ -137,6 +137,31 @@ export type FixtureRun = {
 /** Saves report whether they actually wrote — an unchanged save is a no-op by design. */
 export type SaveResult = { ok: boolean; changed: boolean | number };
 
+// Accounts build (2026-08-04). READ-ONLY: there is no admin write path for an
+// account, and no impersonation — a console that can become a customer is a
+// token worth stealing for more than a dashboard.
+export type AccountRow = {
+  id: number;
+  email: string;
+  auth_provider: string;
+  terms_version: string | null;
+  terms_accepted_at: string | null;
+  terms_current: boolean;
+  subscription_status: string | null;
+  subscription_plan: string | null;
+  entitled: boolean;
+  fpl_team_id: number | null;
+  active_sessions: number;
+  created_at: string | null;
+  last_login_at: string | null;
+};
+
+export type AccountList = {
+  accounts: AccountRow[];
+  count: number;
+  terms_version: string;
+};
+
 // --- flagged-player work queue (mirrors api/admin.flag_queue) ---------------
 
 export type FlagKind = "actionable" | "transient" | "known_limitation";

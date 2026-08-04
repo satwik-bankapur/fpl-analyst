@@ -17,16 +17,31 @@ it here in the same commit.*
 **All five layers exist as code and are merged into `main`.** Stage A of Layer 5 is
 complete. **Stage B (payments) is built on branch `stage-b` and ships switched OFF** —
 `PAYWALL_ENABLED=false`, `SEND_ENABLED=false`, no Paddle credentials, no Paddle account.
+**Accounts + auth are built on branch `accounts`, which forks off `stage-b`** (magic link
++ Google OAuth, sessions, terms, the entitlement rewire). Neither branch is merged.
+
+### The accounts constraint (2026-08-04) — do not break this
+
+**The FREE brief takes no login.** `POST /api/brief`, the draft picker,
+`/api/preview/*`, `/api/players` and `/api/signup` are anonymous, and an anonymous
+reader of `GET /api/brief/{team}/{gw}` gets a **200 with paid sections locked** — never
+a 401 and never a redirect to `/login`. `api/accounts.py`'s only session dependency is
+`routes._current_account`, which is OPTIONAL everywhere; there is deliberately no
+`_require_account`. `tests/test_accounts.py` §1 fails if a login appears in the free
+funnel. Entitlement now resolves **session → account → subscription**, but
+`billing.is_entitled` and `ENTITLED_STATUSES` are unchanged — the allow-list is still
+the whole rule, and an unknown Paddle status still degrades to free.
 
 - `fpl/` — Layer 1: FPL API client, SQLAlchemy models (13 tables), Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
 - `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`), `config_version` v1.4.
 - `graph/` — Layer 3: real LangGraph `StateGraph`, 5 deterministic nodes + a **template stub Writer**. Owns `graph/sections.py`, the canonical section vocabulary.
 - `writer/` — Layer 4: LLM writer, §7 validator, payload serializer, generic preview renderer. **Built and tested, but NOT in the serving path** — see below.
-- `api/` — Layer 5: FastAPI, 32 routes (14 public + the 18-operation token-gated
-  `/api/admin/*` operator surface). Stage B added `api/billing.py`, `api/tokens.py`,
-  `api/send.py` and `writer/emails.py`.
-- `web/` — Layer 5: Next.js frontend, 12 routes (7 public, re-skinned to the Scout
-  Report design; 5 under `/admin`, token-gated and `noindex`).
+- `api/` — Layer 5: FastAPI. Stage B added `api/billing.py`, `api/tokens.py`,
+  `api/send.py` and `writer/emails.py`; the accounts build (2026-08-04) added
+  `api/accounts.py`, the `/api/auth/*` surface, `POST /api/account/delete` and the
+  read-only `GET /api/admin/accounts`.
+- `web/` — Layer 5: Next.js frontend, 15 routes (9 public, re-skinned to the Scout
+  Report design; 6 under `/admin`, token-gated and `noindex`).
 
 ### Current serving reality (read before you promise anything)
 

@@ -41,8 +41,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from fpl.models import EmailSignup, Subscription, WebhookEvent
+from fpl.models import Account, EmailSignup, Subscription, WebhookEvent
 
+from . import accounts
 from .config import settings
 
 log = logging.getLogger("api.billing")
@@ -254,6 +255,83 @@ def entitled_for_team(session, team_id: int, *, now: datetime | None = None) -> 
     return any(is_entitled(s, now=now) for s in rows)
 
 
+def entitled_for_account(session, account_id: int | None, team_id: int | None = None,
+                         *, now: datetime | None = None) -> bool:
+    """Is this ACCOUNT entitled — and, if `team_id` is given, for that team?
+
+    The accounts build (2026-08-04) makes this the gating path: session -> account
+    -> subscription. `is_entitled` is unchanged and still the only place a status
+    is judged, so `ENTITLED_STATUSES` remains the whole rule and an unknown status
+    still degrades to free through here exactly as it did through `entitled_for_team`.
+
+    TEAM SCOPING IS KEPT. A subscription names an `fpl_team_id` (from the verified
+    checkout `custom_data`), and an entitled account still only opens the brief for
+    the team it paid for. A subscription with a NULL team — a season pass bought
+    before a team id existed — opens any team, because there is no narrower reading
+    of what they bought. Dropping the scope entirely would have been the easier
+    change and would have quietly turned one subscription into a service for all 11
+    million FPL teams.
+
+    `account_id=None` is False, not an error: the anonymous free view is a normal
+    state, not a failure.
+    """
+    if account_id is None:
+        return False
+    rows = session.scalars(
+        select(Subscription).where(Subscription.account_id == account_id)).all()
+    return any(
+        is_entitled(s, now=now)
+        and (team_id is None or s.fpl_team_id is None or s.fpl_team_id == team_id)
+        for s in rows
+    )
+
+
+def account_for_subscription_id(session, subscription_id: str | int | None) -> Account | None:
+    """The account a full-view JWT's `sub` claim points at, or None.
+
+    Used to turn an emailed brief link into a session (spec: the links must keep
+    working, but must resolve THROUGH an account rather than granting standalone).
+    A subscription with no linked account returns None, which is what makes a
+    forwarded token grant nothing.
+    """
+    if subscription_id is None:
+        return None
+    try:
+        sub = session.get(Subscription, int(subscription_id))
+    except (TypeError, ValueError):
+        return None
+    if sub is None or sub.account_id is None:
+        return None
+    return session.get(Account, sub.account_id)
+
+
+def link_account(session, sub: Subscription, email: str | None,
+                 *, now: datetime | None = None) -> None:
+    """Attach a subscription to the account for `email`, creating the account if new.
+
+    Called from the webhook only, with the address out of the VERIFIED payload —
+    the same rule as plan and price (audit §D1.5). A client cannot name the account
+    its money lands on.
+
+    The account is created WITHOUT terms acceptance: nobody has ticked a box yet,
+    and `accounts.needs_terms_acceptance` will require it at their first sign-in
+    before paid content is served. Recording consent here because we happen to be
+    creating a row would be recording consent nobody gave.
+    """
+    email = accounts.normalize_email(email)
+    if not email:
+        # Recorded, unlinked, not entitled through any session — see the model note.
+        log.warning("billing: subscription id=%s has no usable email; left unlinked",
+                    sub.id)
+        return
+    account, created = accounts.find_or_create_account(
+        session, email, provider="magic_link", now=now)
+    sub.account_id = account.id
+    if created:
+        log.info("billing: subscription id=%s linked to NEW account id=%s",
+                 sub.id, account.id)
+
+
 def active_subscriptions(session, *, now: datetime | None = None) -> list[Subscription]:
     """Every subscription the send job should mail. Filtered through `is_entitled`."""
     rows = session.scalars(select(Subscription)).all()
@@ -406,8 +484,13 @@ def _apply_subscription(session, event_type: str, data: dict,
         _upsert_signup_tier(session, email, team_id)
 
     session.flush()
-    log.info("billing: %s -> subscription id=%s status=%s plan=%s",
-             event_type, row.id, row.status, row.plan)
+    # Link AFTER the flush so `row.id` exists for the log line. Unconditional —
+    # not gated on the status — because a past_due subscription still belongs to
+    # somebody, and it must already be attached when it later goes active.
+    link_account(session, row, email, now=now)
+
+    log.info("billing: %s -> subscription id=%s status=%s plan=%s account=%s",
+             event_type, row.id, row.status, row.plan, row.account_id)
     return Handled("subscription_upserted", subscription_id=row.id)
 
 
@@ -456,8 +539,9 @@ def _apply_season_pass(session, data: dict, now: datetime) -> Handled:
 
     _upsert_signup_tier(session, email, team_id)
     session.flush()
-    log.info("billing: season pass -> subscription id=%s ends=%s",
-             row.id, row.current_period_end)
+    link_account(session, row, email, now=now)
+    log.info("billing: season pass -> subscription id=%s ends=%s account=%s",
+             row.id, row.current_period_end, row.account_id)
     return Handled("season_pass_granted", subscription_id=row.id)
 
 
