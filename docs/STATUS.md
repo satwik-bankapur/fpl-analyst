@@ -4,16 +4,23 @@ Written by reading the repo, running the suites, and tracing contracts end to en
 **Not** by reading the specs. Where the specs and the code disagree, the code wins
 and the disagreement is recorded below.
 
-**Three passes are recorded here.** The audit (§1–6) was read-only. A follow-up
+**Five passes are recorded here.** The audit (§1–6) was read-only. A follow-up
 pre-hibernation pass then fixed the items marked ✅ **FIXED** — see §7 for exactly
 what changed and what deliberately did not. Where a §1–6 finding has been resolved,
 the original text is kept (so the reasoning survives) with the fix noted inline.
 **§8 records the 2026-08-01 security & quality audit**, whose full findings live in
-`docs/AUDIT.md`.
+`docs/AUDIT.md`. **§9 records Stage B** (payments, built and switched off).
+**§10 is the 2026-08-04 consolidation truth pass** — everything merged to `main`,
+and the explicit list of what has never touched a real external provider.
+
+> **§10 supersedes the numbers in this header block and the branch state in §1.**
+> If you read only one section, read §10.
 
 Post-fix state as of 2026-08-01: **275 tests passing**, `npm run build` clean,
 `alembic upgrade head` = `c3d4e5f6a7b8`. The §7 pass reported 155 tests; the inspector
 and admin console work took it to 252, and the security pass added 23 regressions.
+*(Superseded — as of 2026-08-04 the count on `main` is **467** and the head is
+`e5f6a7b8c9d0`. See §10.)*
 
 ---
 
@@ -906,3 +913,134 @@ sandbox `subscription.created` → confirm a `subscriptions` row → then, and o
   doing it while `RUN_SCHEDULER=true` would mail every customer twice.
 - **`next@14.2.35`** — unchanged from §8, and now one major further behind whatever ships
   next.
+
+---
+
+## 10. Consolidation truth pass — 2026-08-04
+
+*Written after merging `stage-b` and `accounts` into `main`, immediately before creating
+any external account. This section supersedes every count and every branch claim earlier
+in this document. It exists for one reader: the version of me who comes back in September
+having forgotten all of this, sees a green test suite, and concludes the integrations
+work. **They do not.** Read §10.4 before you conclude anything.*
+
+### 10.1 Branch state — everything is merged, nothing is outstanding
+
+`main` @ **`972f2b3`** — "Close accounts + auth". In sync with `origin/main`, working
+tree clean.
+
+The merge was done in dependency order (`accounts` forks off `stage-b`, which forks off
+`main`), both with `--no-ff` so the two bodies of work stay legible in the history:
+
+```
+972f2b3  Close accounts + auth              (merge)
+bd4f028  Close Stage B: payment machinery   (merge)
+67a7472  Accounts + auth: magic link, Google, sessions, and the entitlement rewire
+f9a3dee  Stage B: payments, tokens, the paywall flip and the weekly send
+351514c  Merge audit-2026-08-01
+```
+
+Both merges were clean — **zero conflicts**.
+
+**There are no unmerged branches.** Every local pointer that was fully merged has been
+deleted; `main` is the only local branch. The remote still carries the historical feature
+branches (`stage-b`, `accounts`, `audit-2026-08-01`, `inspector-2026-07-31`,
+`admin-ui-2026-07-30`, `stage-a-reskin`) as archived pointers — they contain nothing that
+is not in `main`. §1's "Branches" table is now historical; ignore it.
+
+### 10.2 Verified on `main` after the merge — not on the branches
+
+Both of these were run **after** the second merge, on `main`, because a suite that was
+green on two branches separately proves nothing about their merge:
+
+| Check | Result |
+|---|---|
+| `.venv/Scripts/python -m pytest -q` | **467 passed**, 1 warning, ~70s |
+| `npm --prefix web run build` | clean, **17 routes** |
+| `alembic heads` | `e5f6a7b8c9d0` (accounts) |
+| `git status` | clean, `main` in sync with `origin/main` |
+
+**Test count by file — 467 total:**
+
+| File | Tests | | File | Tests |
+|---|---:|---|---|---:|
+| `test_stage_b.py` | 104 | | `test_engine.py` | 18 |
+| `test_accounts.py` | 83 | | `test_parsers.py` | 15 |
+| `test_api.py` | 81 | | `test_backfill.py` | 11 |
+| `test_imports.py` | 54 | | `test_writer.py` | 9 |
+| `test_graph.py` | 30 | | `test_sync.py` | 7 |
+| `test_sections.py` | 28 | | `test_rollover.py` | 4 |
+| `test_trace.py` | 19 | | `test_client.py` | 4 |
+
+The trajectory, for calibration: 155 (§7) → 252 (inspector + admin) → 275 (§8 security)
+→ 383 (Stage B) → **467** (accounts).
+
+### 10.3 Route and surface counts
+
+**API — 41 endpoints across 38 unique paths** (three paths carry two methods:
+`/admin/euro-weeks`, `/admin/notes`, `/email/unsubscribe`).
+
+| Group | Count | Auth |
+|---|---:|---|
+| Public / anonymous | 9 | none — `/health`, `/brief`, `/brief/{team}/{gw}`, `/brief/draft/{id}`, `/players`, `/signup`, `/preview/latest`, `/preview/{gw}`, `/checkout` |
+| Auth (`/auth/*`) | 6 | session-optional by design |
+| Account | 1 | session — `/account/delete` |
+| Email lifecycle (`/email/*`) | 4 | token in link |
+| Paddle webhook | 1 | HMAC signature |
+| Admin (`/admin/*`) | 20 | `ADMIN_TOKEN` Bearer |
+
+**Web — 17 routes** (up from 15; `/terms` and `/refunds` added 2026-08-04):
+
+- **11 public:** `/`, `/story`, `/login`, `/account`, `/privacy`, `/terms`, `/refunds`,
+  `/unsubscribe`, `/brief/[teamId]`, `/brief/draft/[draftId]`, `/_not-found`
+- **6 admin** (token-gated, `noindex`): `/admin`, `/admin/accounts`, `/admin/euro-weeks`,
+  `/admin/fixtures`, `/admin/inspect`, `/admin/notes`
+
+**Database — 20 tables.** (CLAUDE.md's "13 tables" described Layer 1 only and predates
+both later builds: Stage B added `subscriptions`, `webhook_events`, `send_log`,
+`rate_hits`; accounts added `accounts`, `sessions`, `magic_link_tokens`.)
+
+### 10.4 What has never touched a real external provider
+
+**This is the section that matters. A green suite is not a working integration.**
+
+Every test in this repo is offline and deterministic — frozen JSON assets served through
+a `FakeClient`, and every signature computed locally to the provider's *documented*
+scheme. That design is correct and deliberate. It also means the suite proves the code on
+**our** side of each boundary and says **nothing** about the boundary itself.
+
+| Provider | Ever contacted? | What is proven | What is NOT proven |
+|---|---|---|---|
+| **Paddle** | **Never.** No account exists — neither sandbox nor live. | The webhook verifier, idempotency via `webhook_events`, the entitlement allow-list, the price-id→plan map, season-pass expiry, checkout request construction. 104 tests. | That Paddle's real signature header matches our parse. That a real `subscription.created` payload has the fields we read. That checkout returns a URL that opens. **No transaction has ever been created, by anyone, in any environment.** |
+| **Google OAuth** | **Never.** No Google Cloud project exists. | State/nonce CSRF handling, the callback flow, ID-token issuer checks, verified-email enforcement, cross-provider account unification. | That the registered redirect URI matches (Google compares exact strings). That the consent screen passes. That a real ID token parses. |
+| **Resend** | **Never.** No account, no verified domain, no API key. `RESEND_API_KEY` is empty, so `api/mail.py` logs and returns. | Message construction, the RFC 8058 one-click unsubscribe header, `send_log` claiming, the batch cap. | **That any email has ever arrived in any inbox.** Not one has. SPF/DKIM have never been evaluated by a receiving server. |
+| **Neon / Postgres** | **Never.** Every test runs on in-memory SQLite. | Schema migrations up/down/up with zero drift. | That the migrations apply against real Postgres. Dialect differences are exactly why `citext` was rejected in favour of normalise-at-the-boundary. |
+| **Render** | **Never.** No service created. | `render.yaml` is syntactically a blueprint. | That it deploys. That the start command's `init-db && uvicorn` chain works there. |
+| **Vercel** | **Never.** No project created. | `npm run build` is clean locally. | That the `web/` root-directory setting and env wiring work. |
+| **GitHub Actions cron** | **Never run.** The workflow exists; the two required secrets do not. | The YAML is valid. | That it authenticates against a live `/api/admin/sync`. |
+| **FPL API** | **Yes — this one is real.** `python -m fpl sync` hits the live API and has been run. | The client, parsers, and abort-or-nothing sync against real upstream payloads. | Nothing outstanding. |
+
+**The single sentence to carry into September:** the only external system this project has
+ever actually spoken to is the FPL API. Payments, login-with-Google, and email are all
+code that has never met the thing it is written against.
+
+`docs/GO-LIVE.md` is the ordered runbook that closes this list, and its step 13 is the
+first-live-test sequence that converts each row above from "not proven" to "proven".
+
+### 10.5 Still open — unchanged by this pass
+
+Nothing in the merge fixed any of these. They were open before and they are open now:
+
+- **The LLM writer is still wired to nothing.** `api/service.py` imports exactly one
+  symbol from `writer/` (`render_generic_stub`). Every brief a customer would receive
+  comes from the deterministic template stub. This is the last product gap, gated on
+  prompt iteration, not engineering. Do not describe the product as LLM-written.
+- **The three legal pages are two-thirds placeholder.** `/privacy` is real prose;
+  `/terms` and `/refunds` are TODO stubs with the routing and footer links in place.
+  Paddle's live review blocks on all three. See `docs/LAUNCH-CHECKLIST.md`.
+- **Double opt-in for signups** (AUDIT §D5) is not built.
+- **Nothing schedules the send batch.** `run_batch` is reachable only via
+  `POST /api/admin/send`.
+- **`next@14.2.35`** — still behind.
+- **Everything ships off:** `PAYWALL_ENABLED=false`, `SEND_ENABLED=false`,
+  `RUN_SCHEDULER=false`, no Paddle credentials, no Google credentials, no Resend key.

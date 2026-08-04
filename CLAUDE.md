@@ -10,15 +10,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current implementation state
 
-*Verified against the tree on 2026-08-01. This section was wrong for months — it claimed
+*Verified against the tree on 2026-08-04. This section was wrong for months — it claimed
 Layers 3–5 were spec-only long after they shipped. If you change a layer's status, change
 it here in the same commit.*
 
-**All five layers exist as code and are merged into `main`.** Stage A of Layer 5 is
-complete. **Stage B (payments) is built on branch `stage-b` and ships switched OFF** —
-`PAYWALL_ENABLED=false`, `SEND_ENABLED=false`, no Paddle credentials, no Paddle account.
-**Accounts + auth are built on branch `accounts`, which forks off `stage-b`** (magic link
-+ Google OAuth, sessions, terms, the entitlement rewire). Neither branch is merged.
+**Everything is on `main`. There are no unmerged branches.** All five layers, Stage A,
+**Stage B (payments)** and **accounts + auth** (magic link, Google OAuth, sessions, terms,
+the entitlement rewire) were merged on 2026-08-04 and `main` is the only local branch.
+
+**Everything paid still ships switched OFF** — `PAYWALL_ENABLED=false`,
+`SEND_ENABLED=false`, `RUN_SCHEDULER=false`, no Paddle credentials, no Google
+credentials, no Resend key, nothing deployed.
+
+**Nothing here has ever spoken to Paddle, Google, or Resend.** The 467-test suite is
+offline by design and proves our side of each boundary only. `docs/STATUS.md` §10.4 is
+the explicit per-provider list; `docs/GO-LIVE.md` is the ordered runbook that closes it.
 
 ### The accounts constraint (2026-08-04) — do not break this
 
@@ -32,7 +38,7 @@ funnel. Entitlement now resolves **session → account → subscription**, but
 `billing.is_entitled` and `ENTITLED_STATUSES` are unchanged — the allow-list is still
 the whole rule, and an unknown Paddle status still degrades to free.
 
-- `fpl/` — Layer 1: FPL API client, SQLAlchemy models (13 tables), Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
+- `fpl/` — Layer 1: FPL API client, SQLAlchemy models (**20 tables**: 13 Layer 1 + `meta`, plus Stage B's `subscriptions`/`webhook_events`/`send_log`/`rate_hits` and accounts' `accounts`/`sessions`/`magic_link_tokens`), Alembic-managed schema, `sync_fpl()` job, mode/rollover derivation, APScheduler wiring.
 - `engine/` — Layer 2: deterministic heuristic scoring engine (`score_all` / `score_player`), `config_version` v1.4.
 - `graph/` — Layer 3: real LangGraph `StateGraph`, 5 deterministic nodes + a **template stub Writer**. Owns `graph/sections.py`, the canonical section vocabulary.
 - `writer/` — Layer 4: LLM writer, §7 validator, payload serializer, generic preview renderer. **Built and tested, but NOT in the serving path** — see below.
@@ -40,8 +46,10 @@ the whole rule, and an unknown Paddle status still degrades to free.
   `api/send.py` and `writer/emails.py`; the accounts build (2026-08-04) added
   `api/accounts.py`, the `/api/auth/*` surface, `POST /api/account/delete` and the
   read-only `GET /api/admin/accounts`.
-- `web/` — Layer 5: Next.js frontend, 15 routes (9 public, re-skinned to the Scout
-  Report design; 6 under `/admin`, token-gated and `noindex`).
+- `web/` — Layer 5: Next.js frontend, 17 routes (11 public, re-skinned to the Scout
+  Report design; 6 under `/admin`, token-gated and `noindex`). `/terms` and `/refunds`
+  are **placeholder prose** — routing and footer links exist so Paddle's live review has
+  something to load; the text is still TODO (`docs/LAUNCH-CHECKLIST.md`).
 
 ### Current serving reality (read before you promise anything)
 

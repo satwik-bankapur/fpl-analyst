@@ -35,6 +35,13 @@ export function SiteFooter() {
           <Link href="/privacy" className="text-eyebrow font-medium tracking-normal text-ink-500">
             Privacy
           </Link>
+          {/* Paddle's live-account review checks these are reachable from every page. */}
+          <Link href="/terms" className="text-eyebrow font-medium tracking-normal text-ink-500">
+            Terms
+          </Link>
+          <Link href="/refunds" className="text-eyebrow font-medium tracking-normal text-ink-500">
+            Refunds
+          </Link>
         </div>
         <p className="m-0 text-eyebrow leading-normal tracking-normal text-ink-700">
           Not affiliated with the Premier League or Fantasy Premier League.
