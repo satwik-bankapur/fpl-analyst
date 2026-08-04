@@ -176,6 +176,26 @@ def verify(token: str, *, now: datetime | None = None) -> dict:
     return claims
 
 
+def claims_if_valid(token: str | None, *, now: datetime | None = None) -> dict | None:
+    """The verified claims, or None for absent/invalid/expired. Never raises.
+
+    Added for the accounts build (2026-08-04): the brief route needs `sub` (the
+    subscription id) to resolve the link to an ACCOUNT, not just `team_id`.
+
+    This reads claims the token already carried — it does not add any. The blast
+    radius stated at the top of this module is unchanged precisely because the
+    claim set is unchanged: `sub` was always there, and it names a row that is
+    re-read and re-checked on every request rather than being believed.
+    """
+    if not token:
+        return None
+    try:
+        return verify(token, now=now)
+    except TokenError as exc:
+        log.info("brief token rejected: %s", exc)
+        return None
+
+
 def team_id_if_valid(token: str | None, *, now: datetime | None = None) -> int | None:
     """`token` -> team_id, or None for absent/invalid/expired. Never raises.
 

@@ -298,6 +298,90 @@ class EmailSignup(Base):
         DateTime(timezone=True), nullable=True)
 
 
+class Account(Base):
+    """A logged-in identity (accounts build, 2026-08-04). Layer 5 §5's "no accounts
+    in v1" rule is superseded — see the layer5 drift note of the same date.
+
+    **`email` is the join key to everything that predates accounts.** Subscriptions,
+    signups and send_log were all keyed by address, so the account is introduced as
+    a layer *over* the address rather than a replacement for it. The address is
+    stored already-normalised (stripped, lowercased) by `api.accounts.normalize_email`
+    and carries a UNIQUE index.
+
+    Case-insensitivity is normalisation-at-the-boundary, NOT a `citext` column: the
+    codebase already lowercases every address it touches (`_email_of`,
+    `unsubscribe_token`, `service.signup`), a `citext` column needs a Postgres
+    EXTENSION that a managed database can refuse, and it would be silently absent
+    under SQLite, where the whole test suite runs — so the property would be
+    untested exactly where it is asserted. One writer path, one normalisation, one
+    unique index, and `tests/test_accounts.py::test_email_case_is_normalised_on_every_path`
+    holds it.
+    """
+
+    __tablename__ = "accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    # 'magic_link' / 'google'. The provider of the FIRST successful login; an
+    # account created by magic link that later signs in with Google keeps the
+    # original value and gains `provider_id`. Never used for gating — it is a
+    # support/audit field, and treating it as a credential would mean an attacker
+    # picking their own auth method.
+    auth_provider: Mapped[str] = mapped_column(Text, default="magic_link")
+    # Google's stable subject id (`sub`). NULL for magic-link-only accounts.
+    provider_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    # Terms acceptance, captured at account creation for BOTH providers. A NULL
+    # `terms_accepted_at` on an existing row means "created before terms were
+    # tracked" and is treated as needing acceptance, not as having accepted.
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    terms_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+
+class AuthSession(Base):
+    """A browser session. The class is `AuthSession` because `Session` is
+    SQLAlchemy's own; the TABLE is `sessions` as specified.
+
+    **Only the hash of the session token is stored.** The plaintext exists in the
+    user's cookie and nowhere else, so a database leak yields no usable session —
+    the same property `magic_link_tokens` has, for the same reason. Lookup is by
+    hash, which is why `token_hash` is the primary key rather than a surrogate id.
+    """
+
+    __tablename__ = "sessions"
+
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MagicLinkToken(Base):
+    """A single-use sign-in token, hashed at rest, 15-minute expiry.
+
+    `consumed_at` rather than a DELETE: a token that has been used must be
+    *distinguishable* from one that never existed, so a replayed link can be logged
+    as a replay. Both cases return the same thing to the caller.
+
+    Keyed by `email`, not by account id — requesting a link must not require an
+    account to exist, or the endpoint would answer "no such user" by failing, which
+    is the enumeration oracle the route exists to avoid.
+    """
+
+    __tablename__ = "magic_link_tokens"
+
+    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    email: Mapped[str] = mapped_column(Text, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Subscription(Base):
     """Paid access (spec §1.10). WRITTEN ONLY BY THE VERIFIED WEBHOOK HANDLER.
 
@@ -312,6 +396,14 @@ class Subscription(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(Text, index=True)
+    # The account this subscription belongs to (accounts build, 2026-08-04).
+    # NULLABLE on purpose and permanently: the webhook resolves it from the
+    # verified `custom_data.email`, but a subscription whose account could not be
+    # resolved must still be RECORDED — a billing row we refuse to write because
+    # of an identity problem is money taken with no trace of it. An unlinked row
+    # is simply not entitled through any session, which is the safe direction.
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     fpl_team_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     provider: Mapped[str] = mapped_column(Text, default="paddle")
     # Unique so a redelivered `subscription.created` updates rather than duplicates.

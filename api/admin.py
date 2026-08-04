@@ -11,6 +11,8 @@ and this module has a bug.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 
 from fpl.models import (
@@ -22,7 +24,8 @@ from graph.data import load_fixtures, load_teams, resolve_ep_anchor
 from graph.deps import Deps
 from graph.fixtures_util import swing_score, team_next_fixtures
 
-from . import mail
+from . import billing, mail
+from .config import settings
 from .service import iso_utc
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -206,6 +209,66 @@ def notes(deps: Deps) -> list[dict]:
         for tid, t in teams.items()
     ]
     return sorted(out, key=lambda r: r["team_short"])
+
+
+def accounts_list(deps: Deps, limit: int = 200) -> dict:
+    """Accounts with provider, terms state, linked subscription and last login.
+
+    READ-ONLY, like everything else in this module — there is no admin path that
+    edits or impersonates an account. An operator console that can assume a
+    customer's identity is a console whose token is worth stealing for more than
+    a dashboard.
+
+    Addresses ARE shown here in full, unlike in logs. That is the deliberate line
+    the audit drew (§D4.3): the database has an access story and a single
+    token-gated reader; a log provider has neither. Support cannot answer "why
+    didn't my brief arrive" against a column of hashes.
+    """
+    from fpl.models import Account, AuthSession
+
+    now = datetime.now(timezone.utc)
+    with deps.session_factory() as session:
+        rows = session.scalars(
+            select(Account).order_by(Account.created_at.desc()).limit(limit)).all()
+        subs = {}
+        for sub in session.scalars(select(Subscription)).all():
+            if sub.account_id is not None:
+                # Prefer an entitled subscription when an account has several —
+                # the question this column answers is "can they read the paid
+                # brief", not "how many rows do they have".
+                current = subs.get(sub.account_id)
+                if current is None or billing.is_entitled(sub, now=now):
+                    subs[sub.account_id] = sub
+        live = {
+            account_id: count
+            for account_id, count in session.execute(
+                select(AuthSession.account_id, func.count())
+                .where(AuthSession.expires_at > now)
+                .group_by(AuthSession.account_id)
+            ).all()
+        }
+        out = []
+        for a in rows:
+            sub = subs.get(a.id)
+            out.append({
+                "id": a.id,
+                "email": a.email,
+                "auth_provider": a.auth_provider,
+                "terms_version": a.terms_version,
+                "terms_accepted_at": iso_utc(a.terms_accepted_at),
+                # Computed against the CURRENT version, so a terms bump lights up
+                # the whole column at once and the operator can see the blast radius.
+                "terms_current": (a.terms_accepted_at is not None
+                                  and (a.terms_version or "") == settings.terms_version),
+                "subscription_status": sub.status if sub else None,
+                "subscription_plan": sub.plan if sub else None,
+                "entitled": billing.is_entitled(sub, now=now) if sub else False,
+                "fpl_team_id": sub.fpl_team_id if sub else None,
+                "active_sessions": live.get(a.id, 0),
+                "created_at": iso_utc(a.created_at),
+                "last_login_at": iso_utc(a.last_login_at),
+            })
+    return {"accounts": out, "count": len(out), "terms_version": settings.terms_version}
 
 
 def euro_weeks(deps: Deps) -> list[dict]:

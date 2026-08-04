@@ -98,5 +98,53 @@ class ApiSettings(BaseSettings):
     global_generation_limit: int = 500                  # GLOBAL_GENERATION_LIMIT
     global_generation_window_s: int = 3600
 
+    # --- accounts + auth (2026-08-04) --------------------------------------
+    # Google OAuth. Empty client id => the Google buttons/routes are OFF (404),
+    # rather than half-present and failing at the redirect. Magic link still works.
+    google_client_id: str = ""                          # GOOGLE_CLIENT_ID
+    google_client_secret: str = ""                      # GOOGLE_CLIENT_SECRET
+    # Where Google sends the user back. Must match the console entry EXACTLY,
+    # including scheme and trailing path — Google compares it as a string.
+    google_redirect_uri: str = "http://127.0.0.1:8000/api/auth/google/callback"
+
+    # Terms version presented at signup. BUMP THIS when the terms change: an
+    # account whose stored version differs is prompted to re-accept before paid
+    # content is served (`accounts.needs_terms_acceptance`). A date-like string
+    # rather than a number so the value is self-documenting in the DB.
+    terms_version: str = "2026-08-04"                   # TERMS_VERSION
+
+    # Session lifetime. 30 days: long enough that a weekly product does not ask
+    # for a link every visit, short enough that an abandoned laptop expires.
+    session_ttl_days: int = 30                          # SESSION_TTL_DAYS
+    # Magic link lifetime, in minutes. Short by design — the link IS the credential.
+    magic_link_ttl_minutes: int = 15                    # MAGIC_LINK_TTL_MINUTES
+
+    # Cookie flags. Secure defaults ON: the only environment where it must be off
+    # is plain-http local dev, and defaulting the other way means one forgotten
+    # env var ships session cookies in the clear.
+    session_cookie_secure: bool = True                  # SESSION_COOKIE_SECURE
+    # 'lax' is right when the API and the web app share a registrable domain
+    # (api.example.com + example.com), which is the launch topology. 'none'
+    # (which REQUIRES Secure) is the escape hatch for a genuinely cross-site
+    # deployment. Never 'strict': it drops the cookie on the magic-link click,
+    # because that arrives as a cross-site top-level navigation from an email.
+    session_cookie_samesite: str = "lax"                # SESSION_COOKIE_SAMESITE
+    # Set to the parent domain (".example.com") to share the cookie between the
+    # web app and the API. Empty = host-only, which is correct for local dev.
+    session_cookie_domain: str = ""                     # SESSION_COOKIE_DOMAIN
+
+    # Magic-link requests per IP per window. HARD limit: this endpoint sends mail
+    # to an address the caller names, so it is both a spam cannon and a bill.
+    # Durable (DbRateLimiter), because an in-process counter resets on every
+    # Render wake and this one has to hold across them.
+    auth_link_limit: int = 5                            # AUTH_LINK_LIMIT
+    auth_link_window_s: int = 3600                      # AUTH_LINK_WINDOW_S
+    # Per-ADDRESS ceiling, separate from the per-IP one. Without it, a botnet
+    # mails one victim from a thousand IPs and every request is under the per-IP cap.
+    auth_link_per_email_limit: int = 5                  # AUTH_LINK_PER_EMAIL_LIMIT
+    # Auth verifications/callbacks per IP per window — a token-guessing ceiling.
+    auth_verify_limit: int = 30                         # AUTH_VERIFY_LIMIT
+    auth_verify_window_s: int = 900                     # AUTH_VERIFY_WINDOW_S
+
 
 settings = ApiSettings()

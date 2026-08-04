@@ -87,9 +87,16 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
 
+# `allow_credentials=True` is what lets the session cookie cross from the Next.js
+# origin to this one (accounts build, 2026-08-04). It is safe ONLY because
+# `allow_origins` is a single exact origin from config and never `*` — the two
+# settings are a pair, and CORS refuses the wildcard-plus-credentials combination
+# outright rather than letting anyone's page read authenticated responses.
+# If `FRONTEND_ORIGIN` ever becomes a list or a regex, re-derive this decision.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
+    allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

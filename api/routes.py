@@ -15,13 +15,14 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from fpl.errors import FPLError
+from fpl.models import Account
 from graph.deps import Deps
 
-from . import admin, billing, inspect, mail, send, service, tokens
+from . import accounts, admin, billing, inspect, mail, send, service, tokens
 from .config import settings
 from .ratelimit import (
-    GLOBAL_BUCKET, admin_limiter, db_limiter, global_limiter, limiter,
-    request_limiter,
+    GLOBAL_BUCKET, admin_limiter, auth_email_limiter, auth_link_limiter,
+    auth_verify_limiter, db_limiter, global_limiter, limiter, request_limiter,
 )
 from .service import get_deps
 
@@ -108,6 +109,13 @@ class CheckoutRequest(BaseModel):
     email: str
     team_id: TeamId | None = None
     plan: Literal["monthly", "season"]
+    # Terms acceptance, ticked on the checkout card (accounts build, 2026-08-04).
+    # Checkout is the third account-creation path — alongside magic link and
+    # Google — and without this one a customer provisioned by the webhook would
+    # have no recorded consent, so their own emailed brief link would open the
+    # FREE view and read as a bug. Defaults false: a consent record must never be
+    # created by a field the caller simply omitted.
+    accept_terms: bool = False
     _ck_email = field_validator("email")(_valid_email)
 
 
@@ -115,6 +123,17 @@ class EuroWeekReplace(BaseModel):
     # The whole grid in one submission. Bounded so a malformed client can't hand
     # the DB an unbounded rewrite; 20 clubs x 38 GWs is the real ceiling.
     rows: list[EuroWeekRequest] = Field(max_length=760)
+
+
+class LinkRequest(BaseModel):
+    """`POST /api/auth/request-link`. Note what is absent: no password, no flag a
+    caller could set to skip the email round trip."""
+
+    email: str
+    # Where to land after verification. Reduced by `accounts.safe_redirect` to a
+    # same-site path before it is ever put in a Location header.
+    next: str | None = Field(default=None, max_length=512)
+    _ck_email = field_validator("email")(_valid_email)
 
 
 def _client_ip(request: Request) -> str:
@@ -179,6 +198,132 @@ def _enforce_generation_budget(request: Request, deps: Deps) -> None:
     global_limiter.enforce(deps.session_factory, GLOBAL_BUCKET)
 
 
+# --- sessions (accounts build, 2026-08-04) ---------------------------------
+#
+# READ THIS BEFORE ADDING A DEPENDENCY TO ANY ROUTE.
+#
+# `_current_account` is OPTIONAL, always, everywhere. There is no
+# `_require_account`, and adding one to anything in the free funnel — POST
+# /api/brief, GET /api/brief/draft/*, /api/preview/*, /api/players, /api/signup —
+# is the one change this build was told it could not make. The free brief is the
+# funnel; a login in front of it is not a hardening, it is the product's front
+# door welded shut. Paid sections are gated by `gate_sections` and nothing else,
+# exactly as before; a session only changes which side of that allow-list you land on.
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Attach a session cookie. httpOnly + Secure + SameSite, all three.
+
+    - **httpOnly**: no script can read it, so an XSS in the Next.js app cannot
+      exfiltrate a session — the single highest-value flag here.
+    - **Secure**: refuses to travel over plain http. On by default; only local
+      dev turns it off, via SESSION_COOKIE_SECURE=false.
+    - **SameSite=lax**: sent on top-level navigations (which is what a magic-link
+      click IS) but not on cross-site subrequests. 'strict' would drop the cookie
+      on the very click that establishes it.
+    - **max_age matched to the row's `expires_at`**: a cookie that outlives its
+      row is a guaranteed silent logout; one that dies early is a confusing one.
+    """
+    response.set_cookie(
+        accounts.SESSION_COOKIE,
+        token,
+        max_age=settings.session_ttl_days * 86400,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite=settings.session_cookie_samesite,
+        domain=settings.session_cookie_domain or None,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        accounts.SESSION_COOKIE,
+        domain=settings.session_cookie_domain or None,
+        path="/",
+    )
+
+
+def _session_token(request: Request) -> str | None:
+    return request.cookies.get(accounts.SESSION_COOKIE)
+
+
+def _current_account(request: Request, deps: Deps):
+    """The signed-in account, or None. NEVER raises, never 401s.
+
+    Returns a detached snapshot (a small dict) rather than a live ORM object,
+    because the session it was loaded in closes here and a lazy attribute read
+    afterwards would raise `DetachedInstanceError` inside an unrelated route.
+    """
+    token = _session_token(request)
+    if not token:
+        return None
+    with deps.session_factory() as session:
+        account = accounts.account_for_session(session, token)
+        if account is None:
+            return None
+        return {
+            "id": account.id,
+            "email": account.email,
+            "auth_provider": account.auth_provider,
+            "terms_required": accounts.needs_terms_acceptance(account),
+        }
+
+
+def _account_snapshot(deps: Deps, account_id: int) -> dict | None:
+    """The same detached shape as `_current_account`, but by id.
+
+    Needed after a full-view link is exchanged for a session: the terms gate must
+    be applied to the account we just signed in, and re-reading the cookie would
+    mean reading a `Set-Cookie` the client has not sent back yet.
+    """
+    with deps.session_factory() as session:
+        account = session.get(Account, account_id)
+        if account is None:
+            return None
+        return {
+            "id": account.id,
+            "email": account.email,
+            "auth_provider": account.auth_provider,
+            "terms_required": accounts.needs_terms_acceptance(account),
+        }
+
+
+def _paid_account_id(account: dict | None) -> int | None:
+    """The account id to gate PAID content with — None if terms are outstanding.
+
+    THE TERMS GATE LIVES HERE, in one function, and it withholds rather than
+    errors. An account that has not accepted the current terms sees the free view
+    and `GET /api/auth/me` tells the UI to prompt; it does not get a 403, because
+    a paying customer who is one checkbox behind is a customer, not an intruder.
+
+    Deliberately NOT folded into `billing.entitled_for_account`: entitlement is
+    "have they paid", terms are "have they agreed". Merging them would mean a
+    terms bump reads, in the logs and to the next reader, as a billing lapse.
+    """
+    if account is None or account["terms_required"]:
+        return None
+    return account["id"]
+
+
+def _login(deps: Deps, response: Response, request: Request, account_id: int) -> None:
+    """Establish a session, rotating away from whatever arrived.
+
+    SESSION FIXATION: the old cookie's row is deleted before the new one is
+    minted, so the identifier that carried the caller into this request cannot
+    carry them out of it with more privilege than it came in with. Sessions are
+    server-generated only — there is no path that turns a client-supplied value
+    into a row — so this closes the residual case rather than the whole class.
+    """
+    now = datetime.now(timezone.utc)
+    with deps.session_factory() as session, session.begin():
+        accounts.destroy_session(session, _session_token(request))
+        token = accounts.create_session(session, account_id, now=now)
+        account = session.get(Account, account_id)
+        if account is not None:
+            account.last_login_at = now
+    _set_session_cookie(response, token)
+
+
 # --- 1.1 / draft brief -----------------------------------------------------
 
 @router.post("/brief")
@@ -223,22 +368,42 @@ def get_draft_brief(draft_id: uuid.UUID, deps: Deps = Depends(get_deps)):
 
 
 @router.get("/brief/{team_id}/{gw}")
-def get_team_brief(team_id: int = Path(ge=1, le=MAX_ID),
+def get_team_brief(request: Request, response: Response,
+                   team_id: int = Path(ge=1, le=MAX_ID),
                    gw: int = Path(ge=0, le=MAX_GAMEWEEK),
                    token: str | None = None,
                    deps: Deps = Depends(get_deps)):
-    """§1.2. No/invalid token -> free view. Valid token + live entitlement -> full.
+    """§1.2. No session and no valid link -> free view. Entitled account -> full.
 
-    `?token=` is BACK (Stage B, 2026-08-01). It was deliberately absent through
-    Stage A — nothing minted or verified a JWT, and a signature-shaped parameter
-    that silently does nothing reads as implemented auth to the next person. It
-    returns now together with `BRIEF_TOKEN_SECRET`, `api/tokens.py` and the send
-    job that mints it.
+    NO LOGIN WALL. An anonymous reader gets the brief with paid sections locked,
+    which is the same 200 they got before accounts existed.
 
-    An invalid token is NOT an error: the contract is "degrade to free", and a 401
-    here would tell a forger exactly which of their attempts was closer.
+    Two ways to arrive entitled, and the second is why the emailed links kept
+    working across this build (accounts, 2026-08-04):
+
+    1. **A session cookie** naming an account with a live subscription for this
+       team. The ordinary path once someone has signed in.
+    2. **A `?token=` full-view link** from an email. It no longer grants access by
+       itself — it resolves to the ACCOUNT that owns the subscription it names and
+       is exchanged for a session right here. A token whose subscription has no
+       linked account resolves to nothing and opens nothing, which is what stops a
+       forwarded link from working for a stranger.
+
+    An invalid token or cookie is NOT an error: the contract is "degrade to free",
+    and a 401 would tell a forger which of their attempts was closer.
     """
-    brief = service.get_team_brief(deps, team_id, gw, token)
+    account = _current_account(request, deps)
+    account_id = _paid_account_id(account)
+
+    if account_id is None and token:
+        # The link exchange. Only on a genuine miss, so a signed-in reader never
+        # has their session silently swapped by a stale link in an old email.
+        linked = service.account_from_link_token(deps, token, team_id)
+        if linked is not None:
+            _login(deps, response, request, linked)
+            account_id = _paid_account_id(_account_snapshot(deps, linked))
+
+    brief = service.get_team_brief(deps, team_id, gw, account_id)
     if brief is None:
         raise HTTPException(status_code=404, detail={"error": "invalid_team_id"})
     return brief
@@ -299,6 +464,17 @@ def checkout(body: CheckoutRequest, request: Request, deps: Deps = Depends(get_d
     # The address goes on the free list now, so an abandoned checkout still leaves
     # a lead and still gets the weekly preview.
     _safe_signup(deps, body.email, body.team_id, "checkout")
+
+    # Provision the account here, at the moment the customer ticked the terms box,
+    # so the webhook has an accepted account to link to rather than creating a bare
+    # one. Nothing is GRANTED — this writes an identity, not an entitlement, and
+    # entitlement still comes only from the verified webhook (audit §D3).
+    if body.accept_terms:
+        email = accounts.normalize_email(body.email)
+        if email:
+            with deps.session_factory() as session, session.begin():
+                accounts.find_or_create_account(
+                    session, email, provider="magic_link", accept_terms_now=True)
     try:
         url = billing.create_checkout(body.plan, body.email, body.team_id)
     except billing.CheckoutError as e:
@@ -409,6 +585,248 @@ def email_delete(e: str = "", t: str = "", deps: Deps = Depends(get_deps)):
     return {"ok": True, **result}
 
 
+# --- auth: magic link + Google (accounts build, 2026-08-04) ----------------
+
+@router.post("/auth/request-link")
+def auth_request_link(body: LinkRequest, request: Request,
+                      deps: Deps = Depends(get_deps)):
+    """Mail a single-use sign-in link. **Answers identically for every address.**
+
+    NO ENUMERATION ORACLE. The response body, the status code and the work done
+    are the same whether the address has an account, has a subscription, or has
+    never been seen: a token row is written and a mail is attempted in all three
+    cases, because the account is created at VERIFY time, not here. If the
+    unknown-address case skipped the write and the send, the response time would
+    say what the body would not.
+
+    Rate limited on two axes, both durable (see api/ratelimit.py): per IP, and
+    per ADDRESS. The second is not redundant — a distributed sender mailbombing
+    one victim is under the per-IP cap on every single request.
+    """
+    ip = _client_ip(request)
+    auth_link_limiter.enforce(deps.session_factory, f"authlink:ip:{ip}")
+
+    email = accounts.normalize_email(body.email)
+    if email is None:
+        # Same shape as success. A 400 here would answer "is this a real address"
+        # for free, and pydantic already refused the grossly malformed.
+        return {"ok": True}
+
+    # Keyed by the HASH of the address: this bucket string lands in `rate_hits`,
+    # which is a table, and a table of who tried to sign in and when is a mailing
+    # list. Same rule as the logs (audit §D4.3).
+    auth_email_limiter.enforce(deps.session_factory,
+                               f"authlink:email:{accounts.mask(email)}")
+
+    with deps.session_factory() as session, session.begin():
+        token = accounts.issue_magic_link(session, email)
+
+    target = accounts.safe_redirect(body.next, default="/")
+    mail.send_magic_link(email, token, next_path=target)
+    log.info("auth: magic link issued email_hash=%s", accounts.mask(email))
+    return {"ok": True}
+
+
+@router.get("/auth/verify")
+def auth_verify(request: Request, token: str = "", next: str = "",
+                deps: Deps = Depends(get_deps)):
+    """Consume a magic link, create/find the account, establish a session.
+
+    Redirects rather than returning JSON: this URL is clicked in a mail client, so
+    the caller is a browser expecting a page, not a fetch expecting a body. The
+    `Set-Cookie` rides on the redirect response — which is why SameSite must not
+    be 'strict' (a cross-site top-level navigation would drop it).
+
+    `next` goes through `accounts.safe_redirect` before it is put in a Location
+    header. An open redirect on the one route that hands out sessions is how a
+    phishing page borrows this domain for the address bar.
+    """
+    from fastapi.responses import RedirectResponse
+
+    auth_verify_limiter.enforce(deps.session_factory,
+                                f"authverify:ip:{_client_ip(request)}")
+    target = accounts.safe_redirect(next, default="/")
+    web = settings.public_web_url.rstrip("/")
+
+    with deps.session_factory() as session, session.begin():
+        email = accounts.consume_magic_link(session, token)
+
+    if email is None:
+        # Expired, already used, or never existed — one destination for all three.
+        # Distinguishing them tells a caller whether a token they hold is real.
+        return RedirectResponse(f"{web}/login?error=link_invalid", status_code=303)
+
+    with deps.session_factory() as session, session.begin():
+        account, _ = accounts.find_or_create_account(
+            session, email, provider="magic_link")
+        account_id = account.id
+
+    response = RedirectResponse(f"{web}{target}", status_code=303)
+    _login(deps, response, request, account_id)
+    log.info("auth: magic link verified email_hash=%s", accounts.mask(email))
+    return response
+
+
+@router.get("/auth/google/start")
+def auth_google_start(request: Request, next: str = "",
+                      deps: Deps = Depends(get_deps)):
+    """Begin the authorization-code flow. Mints the CSRF `state`.
+
+    `state` is a random nonce stored in a short-lived httpOnly cookie and echoed
+    through Google. The callback accepts only a state that matches the cookie, so
+    a callback the victim's browser did not start — the login-CSRF that would
+    otherwise sign a victim into the ATTACKER's Google account and quietly attach
+    their next purchase to it — has nothing to match.
+    """
+    from fastapi.responses import RedirectResponse
+
+    if not accounts.google_enabled():
+        # 404, not 503: an unconfigured provider is a route that does not exist,
+        # and advertising it would invite reports of a broken button.
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+
+    nonce = accounts.new_token()
+    target = accounts.safe_redirect(next, default="/")
+    response = RedirectResponse(
+        accounts.google_authorize_url(accounts.pack_state(nonce, target)),
+        status_code=303)
+    response.set_cookie(
+        accounts.OAUTH_STATE_COOKIE,
+        # The BARE nonce. The landing path travels in `state`, not here — see
+        # `accounts.pack_state` for why a cookie holding a path breaks the compare.
+        nonce,
+        max_age=600,                       # one round trip, not one session
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite=settings.session_cookie_samesite,
+        domain=settings.session_cookie_domain or None,
+        path="/",
+    )
+    return response
+
+
+@router.get("/auth/google/callback")
+def auth_google_callback(request: Request, code: str = "", state: str = "",
+                         deps: Deps = Depends(get_deps)):
+    """Google hands the browser back here. Validate state, exchange, sign in."""
+    from fastapi.responses import RedirectResponse
+
+    auth_verify_limiter.enforce(deps.session_factory,
+                                f"authverify:ip:{_client_ip(request)}")
+    web = settings.public_web_url.rstrip("/")
+    if not accounts.google_enabled():
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+
+    expected = request.cookies.get(accounts.OAUTH_STATE_COOKIE) or ""
+    nonce, target = accounts.unpack_state(state)
+    # compare_digest, and BOTH must be non-empty: a missing cookie and a missing
+    # `state` would otherwise compare equal as "" == "" and wave the callback through.
+    if not expected or not nonce or not secrets.compare_digest(expected, nonce):
+        log.warning("auth: google callback with bad state")
+        return RedirectResponse(f"{web}/login?error=state_mismatch", status_code=303)
+
+    try:
+        email, subject = accounts.google_exchange(code)
+    except accounts.AuthError as exc:
+        log.warning("auth: google exchange rejected: %s (%s)", exc.code, exc.message)
+        return RedirectResponse(f"{web}/login?error={exc.code}", status_code=303)
+
+    with deps.session_factory() as session, session.begin():
+        account, _ = accounts.find_or_create_account(
+            session, email, provider="google", provider_id=subject)
+        account_id = account.id
+
+    response = RedirectResponse(
+        f"{web}{accounts.safe_redirect(target, default='/')}", status_code=303)
+    _login(deps, response, request, account_id)
+    # The state cookie has done its one job; leaving it is leaving a spare key out.
+    response.delete_cookie(accounts.OAUTH_STATE_COOKIE,
+                           domain=settings.session_cookie_domain or None, path="/")
+    log.info("auth: google sign-in email_hash=%s", accounts.mask(email))
+    return response
+
+
+@router.get("/auth/me")
+def auth_me(request: Request, deps: Deps = Depends(get_deps)):
+    """Who is this browser, and what does the UI need to show?
+
+    200 with `{"signed_in": false}` when anonymous, never 401 — this is called on
+    every page including the free ones, and a 401 in the console on the free brief
+    is an error report waiting to happen.
+    """
+    account = _current_account(request, deps)
+    if account is None:
+        return {"signed_in": False, "entitled": False, "terms_required": False,
+                "terms_version": settings.terms_version,
+                "google_enabled": accounts.google_enabled()}
+    with deps.session_factory() as session:
+        entitled = billing.entitled_for_account(session, account["id"])
+    return {
+        "signed_in": True,
+        "email": account["email"],
+        "auth_provider": account["auth_provider"],
+        # Entitlement is reported independently of the terms gate so the UI can say
+        # "you have a subscription, accept the terms to read it" rather than
+        # showing a paying customer a purchase button.
+        "entitled": entitled,
+        "terms_required": account["terms_required"],
+        "terms_version": settings.terms_version,
+        "google_enabled": accounts.google_enabled(),
+    }
+
+
+@router.post("/auth/accept-terms")
+def auth_accept_terms(request: Request, response: Response,
+                      deps: Deps = Depends(get_deps)):
+    """Record acceptance of the CURRENT terms version for the signed-in account.
+
+    The one place consent is written. Requires a session — this is the single
+    authenticated write in the auth surface, and it is a write about the caller
+    themselves, so 401 is the right answer to anonymous rather than a silent no-op.
+    """
+    account = _current_account(request, deps)
+    if account is None:
+        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+    with deps.session_factory() as session, session.begin():
+        row = session.get(Account, account["id"])
+        if row is not None:
+            accounts.accept_terms(row)
+    return {"ok": True, "terms_version": settings.terms_version}
+
+
+@router.post("/auth/logout")
+def auth_logout(request: Request, response: Response, deps: Deps = Depends(get_deps)):
+    """Drop this session. Idempotent; the row goes, not just the cookie.
+
+    Clearing the cookie alone would leave a live row that anyone holding a copy of
+    the token could still present — a logout that logs nobody out.
+    """
+    with deps.session_factory() as session, session.begin():
+        accounts.destroy_session(session, _session_token(request))
+    _clear_session_cookie(response)
+    return {"ok": True}
+
+
+@router.post("/account/delete")
+def account_delete(request: Request, response: Response,
+                   deps: Deps = Depends(get_deps)):
+    """Delete the signed-in account and everything hanging off it.
+
+    Session-authenticated, because unlike the mailed unsubscribe/delete links this
+    one destroys a login, and a one-click HMAC link that nukes an account is a
+    prefetching mail scanner away from a support incident.
+
+    What is removed and what deliberately survives is `service.delete_account`'s
+    call, not this route's — see it for the billing-retention reasoning.
+    """
+    account = _current_account(request, deps)
+    if account is None:
+        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+    result = service.delete_account(deps, account["id"])
+    _clear_session_cookie(response)
+    return {"ok": True, **result}
+
+
 # --- 1.9 health + admin ----------------------------------------------------
 
 @router.get("/health")
@@ -468,6 +886,13 @@ def admin_notes_list(_: None = Depends(_require_admin), deps: Deps = Depends(get
 def admin_euro_weeks_list(_: None = Depends(_require_admin),
                           deps: Deps = Depends(get_deps)):
     return admin.euro_weeks(deps)
+
+
+@router.get("/admin/accounts")
+def admin_accounts(n: int = 200, _: None = Depends(_require_admin),
+                   deps: Deps = Depends(get_deps)):
+    """Read-only account list (accounts build, 2026-08-04). Token-gated like the rest."""
+    return admin.accounts_list(deps, limit=max(1, min(n, 500)))
 
 
 @router.get("/admin/players")
@@ -558,6 +983,11 @@ def admin_sync(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=2)
     result["rate_hits_purged"] = global_limiter.purge_before(deps.session_factory, cutoff)
+    # Same reasoning, same schedule: expired sessions and spent magic links are
+    # append-only otherwise. Neither is dangerous to keep — both are hashes — but
+    # "it only ever grows" is the bug, not what the rows contain.
+    with deps.session_factory() as session, session.begin():
+        result["auth_rows_purged"] = accounts.purge_expired(session)
     return result
 
 

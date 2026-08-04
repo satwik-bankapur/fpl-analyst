@@ -78,9 +78,88 @@ export function getDraftBrief(draftId: string): Promise<Brief> {
 // `token` is the JWT minted by the send job. Absent or expired, the API answers
 // with the free sections and populates locked_sections — it never 401s, so the
 // page renders either way and the lock cards do the explaining.
+//
+// `credentials: "include"` (accounts build, 2026-08-04) so the session cookie
+// rides along, and so the Set-Cookie from a full-view link exchange is STORED.
+// Without it the link would unlock this one response and the next navigation
+// would silently drop back to the free view.
 export function getTeamBrief(teamId: number, gw: number, token?: string | null): Promise<Brief> {
   const q = token ? `?token=${encodeURIComponent(token)}` : "";
-  return fetch(`${API}/api/brief/${teamId}/${gw}${q}`, { cache: "no-store" }).then(json<Brief>);
+  return fetch(`${API}/api/brief/${teamId}/${gw}${q}`, {
+    cache: "no-store",
+    credentials: "include",
+  }).then(json<Brief>);
+}
+
+// --- auth (accounts build, 2026-08-04) -------------------------------------
+//
+// EVERY call here sends `credentials: "include"`. The session lives in an
+// httpOnly cookie precisely so that no script — ours or an injected one — can
+// read it, which means there is no token to put in an Authorization header and
+// nothing to keep in localStorage.
+
+export type Me = {
+  signed_in: boolean;
+  email?: string;
+  auth_provider?: string;
+  entitled: boolean;
+  terms_required: boolean;
+  terms_version: string;
+  google_enabled: boolean;
+};
+
+export function getMe(): Promise<Me> {
+  return fetch(`${API}/api/auth/me`, {
+    cache: "no-store",
+    credentials: "include",
+  }).then(json<Me>);
+}
+
+// Answers `{ok: true}` for every well-formed address, whether or not it has an
+// account. Do not add UI that reports "no such user" — there is nothing to
+// report, and inventing it would rebuild the enumeration oracle the API closed.
+export function postRequestLink(email: string, next?: string): Promise<{ ok: boolean }> {
+  return fetch(`${API}/api/auth/request-link`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email, next: next ?? null }),
+  }).then(json<{ ok: boolean }>);
+}
+
+// A full-page navigation, not a fetch: the OAuth flow ends in a redirect from
+// Google that has to land in the address bar, and the state cookie must be set
+// on a document request.
+export function googleSignInUrl(next?: string): string {
+  const q = next ? `?next=${encodeURIComponent(next)}` : "";
+  return `${API}/api/auth/google/start${q}`;
+}
+
+export function postAcceptTerms(): Promise<{ ok: boolean; terms_version: string }> {
+  return fetch(`${API}/api/auth/accept-terms`, {
+    method: "POST",
+    credentials: "include",
+  }).then(json<{ ok: boolean; terms_version: string }>);
+}
+
+export function postLogout(): Promise<{ ok: boolean }> {
+  return fetch(`${API}/api/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+  }).then(json<{ ok: boolean }>);
+}
+
+export type DeleteResult = {
+  ok: boolean;
+  account_removed: boolean;
+  subscription_cancel_required: boolean;
+};
+
+export function postDeleteAccount(): Promise<DeleteResult> {
+  return fetch(`${API}/api/account/delete`, {
+    method: "POST",
+    credentials: "include",
+  }).then(json<DeleteResult>);
 }
 
 // Sends a PLAN NAME. There is deliberately no price field to send — the server
@@ -89,12 +168,17 @@ export function getTeamBrief(teamId: number, gw: number, token?: string | null):
 export function postCheckout(
   plan: "monthly" | "season",
   email: string,
-  teamId?: number | null
+  teamId?: number | null,
+  acceptTerms = false
 ): Promise<{ checkout_url: string }> {
   return fetch(`${API}/api/checkout`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ plan, email, team_id: teamId ?? null }),
+    credentials: "include",
+    // `accept_terms` records consent for the account the webhook will later
+    // link this subscription to. Without it, a customer's own emailed brief
+    // link opens the FREE view, because their account has agreed to nothing.
+    body: JSON.stringify({ plan, email, team_id: teamId ?? null, accept_terms: acceptTerms }),
   }).then(json<{ checkout_url: string }>);
 }
 

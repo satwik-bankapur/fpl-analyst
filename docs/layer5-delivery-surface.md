@@ -4,6 +4,14 @@ Consumes: Layers 1–4 (pipeline, cache, writer, generic preview).
 Produces: the public product — API, two-page frontend, email delivery, paid tier.
 Core simplification that shapes everything here: **no user accounts in v1.** Identity = email + FPL team ID, captured at signup/checkout. Paid access is delivered via signed links in email, not logins.
 
+> **SUPERSEDED 2026-08-04 — accounts and auth are built.** The paragraph above is kept
+> because it explains why the rest of this spec is shaped the way it is, but it no longer
+> describes the code. Identity is now an `accounts` row; paid access resolves
+> session → account → subscription; the emailed link resolves to an account and is
+> exchanged for a session rather than granting access on its own. **The free brief is
+> still open and takes no login** — that constraint is the one thing the accounts build
+> was not allowed to change. See the §8 drift note of 2026-08-04 for the full correction.
+
 ---
 
 ## 1. FastAPI route map
@@ -182,7 +190,9 @@ Manual (the entire human surface, by design): `team_notes` weekly, `european_wee
 - Flip: team-ID input replaces draft picker as primary; paywall gating on (locked sections render); Paddle checkout + webhooks live (Paddle account verification started NOW — §7 note); weekly batch + sends armed; free preview email begins.
 - The Stage A email list gets one launch email: "the season's here — your GW1 brief is ready, here's what the full version adds."
 
-**Explicitly LATER (not v1, resist scope creep):** login/accounts, multi-team support, brief history page, chip planner, price-change predictions (that's what `player_history` accrues for), LLM Strategist, mini-league features, Indian-rail payment tier, ~~admin UI~~ (built 2026-07-30 — see the §1.9 drift note; it is an operator console over the endpoints that already existed, not a new product surface, and it added no accounts).
+**Explicitly LATER (not v1, resist scope creep):** ~~login/accounts~~ (built 2026-08-04 —
+see the §8 drift note; magic link + Google, gating the PAID tier only, with the free brief
+still open and login-free), multi-team support, brief history page, chip planner, price-change predictions (that's what `player_history` accrues for), LLM Strategist, mini-league features, Indian-rail payment tier, ~~admin UI~~ (built 2026-07-30 — see the §1.9 drift note; it is an operator console over the endpoints that already existed, not a new product surface, and it added no accounts).
 
 ## 7. Sequencing note for the implementer
 Build order: routes 1.1–1.5 + frontend pages against the stub Writer → email module + welcome flow → Stage A ship → Paddle sandbox integration (checkout + webhooks end-to-end in sandbox) → templates 1–2 → Stage B flip behind a single `PAYWALL_ENABLED` env flag. Start Paddle account onboarding/verification in parallel with Stage A — provider verification latency is the only item on the critical path you don't control.
@@ -193,6 +203,129 @@ Definition of done (Layer 5 overall): Stage A live on real domains; a sandbox Pa
 
 Dated corrections/extensions from the Stage A build. The spec above is the intent;
 these record where the code diverges and why.
+
+**2026-08-04 — ACCOUNTS AND AUTH BUILT. §5's "no user accounts in v1" is SUPERSEDED.**
+
+Read this before §5. The line "Core simplification that shapes everything here: **no
+user accounts in v1.** Identity = email + FPL team ID … Paid access is delivered via
+signed links in email, not logins" is **no longer what the code does**, and the entry in
+§6's "Explicitly LATER" list (`login/accounts`) has moved to *built*. The spec text is
+left in place rather than rewritten because it explains why the earlier design looked the
+way it did; this note is the correction that overrides it.
+
+**What did NOT change, and was the hard constraint on the whole build: the free brief is
+still open.** No login stands in front of `POST /api/brief`, the draft picker,
+`/api/preview/*`, `/api/players` or `/api/signup`. Anonymous readers get a 200 with paid
+sections locked, exactly as they did on 2026-08-01 — never a 401, never a redirect to
+`/login`. `tests/test_accounts.py` §1 asserts this first, and
+`test_no_free_route_answers_401_without_a_session` walks the public surface so a future
+route is covered the day it lands. A login anywhere upstream of the paywall is a product
+kill, not a hardening.
+
+- **Tables (migration `e5f6a7b8c9d0`, additive only).** `accounts`, `sessions`,
+  `magic_link_tokens`, plus a nullable `subscriptions.account_id`. No backfill: the
+  webhook links a subscription on its next delivery, and an unlinked subscription is
+  simply not entitled through any session, which is the direction that fails safe.
+  - **`accounts.email` is TEXT + UNIQUE, not `citext`** — a deliberate deviation from the
+    build request. Case-insensitivity is normalisation-at-the-boundary
+    (`accounts.normalize_email`), which is what the codebase already does with addresses
+    everywhere else. `citext` needs a Postgres EXTENSION a managed database can refuse,
+    and it does not exist under SQLite, where the whole suite runs — so the guarantee
+    would have been untested exactly where it is asserted.
+    `test_email_case_is_normalised_on_every_path` and
+    `test_one_address_in_any_casing_is_one_account` hold it instead.
+  - **Only hashes are stored** for session and magic-link tokens. A dump of either table
+    yields nothing presentable. Plain SHA-256, not bcrypt: these hash 32 random bytes, not
+    a human-chosen password, and a slow hash on the session-lookup path would be a
+    self-inflicted DoS on every request.
+
+- **Entitlement now resolves session -> account -> subscription.** `is_entitled` and
+  `ENTITLED_STATUSES` are **untouched** — the allow-list is still the whole rule and an
+  unknown Paddle status still degrades to free. What changed is only how the subscription
+  is *found*: `billing.entitled_for_account` reads `subscriptions.account_id`, never an
+  address match. `tests/test_accounts.py::test_an_unknown_subscription_status_degrades_to_free`
+  re-asserts the allow-list through the new path on purpose, because the accounts layer is
+  a new place that could have started answering "yes".
+  - **Team scoping survived.** An entitled account opens the brief for the team its
+    subscription names. Dropping the scope would have been the smaller diff and would have
+    quietly turned one subscription into a service for all 11 million FPL teams.
+
+- **The emailed full-view link is no longer a standing credential.** `?token=` still
+  works, but it now resolves to the ACCOUNT that owns the subscription in its `sub` claim
+  and is **exchanged for a session** on first use. A token whose subscription has no
+  linked account opens nothing — which is what stops a forwarded link working for a
+  stranger. The claim set is unchanged (`{sub, team_id, exp, iat}`), so
+  `api/tokens.py`'s blast-radius docstring still holds; `claims_if_valid` only reads what
+  was already there.
+
+- **Terms are a gate on PAID content, never on the free brief.** `routes._paid_account_id`
+  withholds the paid view when `terms_accepted_at` is NULL or its version is stale, and
+  `GET /api/auth/me` reports `entitled` and `terms_required` separately so the UI can say
+  "you have a subscription, accept the terms" rather than showing a paying customer a buy
+  button. A NULL acceptance reads as NOT accepted — treating absence as consent is how a
+  consent record becomes decorative.
+  - **`POST /api/checkout` gained `accept_terms`, and that is load-bearing.** Checkout is
+    the third account-creation path alongside magic link and Google. Without it, a customer
+    provisioned by the webhook has no recorded consent and **their own emailed brief link
+    opens the free view** — which reads as a bug and is the exact failure this field
+    prevents. It carries no pricing authority; `CheckoutRequest` still has no price,
+    amount, currency or price-id field (audit §D3 unchanged).
+
+- **Session security.** httpOnly + Secure + SameSite=lax, all three, with Secure defaulting
+  ON (only plain-http local dev turns it off). `SameSite=strict` is specifically wrong here:
+  it drops the cookie on the magic-link click, which arrives as a cross-site top-level
+  navigation from a mail client. Fixation is closed structurally — no code path turns a
+  client-supplied value into a session row — and `routes._login` additionally deletes the
+  arriving cookie's row before minting a new one. Logout deletes the ROW, not just the
+  cookie; clearing the cookie alone is a logout that logs nobody out.
+  - **CORS gained `allow_credentials=True`.** Safe only because `allow_origins` is a single
+    exact origin from config and never `*`. If `FRONTEND_ORIGIN` ever becomes a list or a
+    regex, re-derive that decision.
+  - **OAuth `state`**: a random nonce in a short-lived httpOnly cookie, compared with
+    `compare_digest`, both halves required non-empty (a missing cookie and a missing param
+    would otherwise compare equal as `"" == ""`). The post-login target travels in `state`,
+    not the cookie, because a cookie value containing `/` gets quoted by the server and
+    arrives back quoted — a CSRF check that fails for the wrong reason is one somebody
+    eventually "fixes" by loosening.
+  - **Open redirect**: `accounts.safe_redirect` is an allow-list of shapes (a path, not
+    `//`, not `/\`, no CR/LF), same reasoning as `FREE_SECTIONS`.
+
+- **Rate limits on auth are DB-backed**, all three, because `POST /api/auth/request-link`
+  mails an address the caller names. Two axes, and the second is not redundant: per-IP stops
+  one host enumerating many addresses, per-address stops many hosts mailbombing one victim
+  (a distributed sender is under the per-IP cap on every single request). The per-address
+  bucket key is a **hash** — `rate_hits.bucket` is a table column, and a table of who tried
+  to sign in is a mailing list.
+
+- **No address reaches a log line** from the auth surface (audit §D4.3 applied without
+  exception; `test_no_address_reaches_a_log_line` walks the magic link, the webhook and the
+  Google callback together). Addresses ARE shown in full on `/admin/accounts`: the line is
+  storage-vs-log, and support cannot answer "why didn't my brief arrive" against hashes.
+
+- **Delete is one cascade behind two doors.** The mailed link (`POST /api/email/delete`,
+  by address) and the signed-in button (`POST /api/account/delete`, by session) both end in
+  `service._purge_account`, so "delete my data" means the same thing whichever one you
+  found. Account, sessions, magic links, signup row and send history go; subscription rows
+  survive **unlinked and anonymised**, because they are a financial record. The cascade is
+  written out in Python rather than left to `ON DELETE`, because SQLite does not enforce FK
+  actions without `PRAGMA foreign_keys=ON` and the whole suite runs on SQLite.
+  - **Deleting an account does NOT cancel a Paddle subscription.** Nothing here can reach
+    into a payment provider and stop a card being charged. `subscription_cancel_required`
+    is returned for exactly this reason and the UI states it *before* the click. Pretending
+    otherwise in a return value would be the most expensive lie in this codebase.
+  - **Unsubscribing from mail still costs no billing access.** Re-asserted now that a
+    session exists (`test_unsubscribing_from_mail_does_not_cost_billing_access`).
+
+- **What is NOT built.** No password auth (there is no password), no X/Twitter provider
+  (explicitly out of scope), no account-to-account subscription transfer, no admin write or
+  impersonation path — `/admin/accounts` is read-only, and that is a ceiling on what the
+  admin token is worth. Google has never been exercised against Google: the token endpoint
+  is injected in tests and no `GOOGLE_CLIENT_ID` exists yet, so the same caveat that applies
+  to Paddle applies here. **The id_token signature is not verified** — it is read from the
+  body of a direct, TLS-and-client-secret-authenticated POST to `oauth2.googleapis.com`,
+  which OIDC Core §3.1.3.7 permits for the code flow; `aud`, `iss` and `email_verified` are
+  all still checked. If that token ever starts arriving from anything the browser touched,
+  `_decode_id_token_payload` becomes a vulnerability and needs real JWKS verification.
 
 **2026-08-01 — Stage B built: billing, tokens, the paywall flip and the weekly send.**
 
