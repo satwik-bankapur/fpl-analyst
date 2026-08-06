@@ -525,8 +525,19 @@ def players(response: Response, deps: Deps = Depends(get_deps)):
 # --- 1.5 signup ------------------------------------------------------------
 
 def _safe_signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> None:
-    service.signup(deps, email, team_id, source)
-    mail.send_welcome(email)  # non-fatal (no-op when unkeyed)
+    """Join the list, then ask the address to prove itself.
+
+    DOUBLE OPT-IN (2026-08-06). `service.signup` returns a confirm token when
+    this address still needs to prove it can be read, and None when it does not
+    — already confirmed, or a tombstoned unsubscribe we must not mail. The
+    welcome email is now sent only ON CONFIRMATION, not here: a welcome to an
+    unconfirmed address is the exact message this change exists to stop, and
+    sending both at once would mean every address got mail whether or not it
+    ever confirmed.
+    """
+    token = service.signup(deps, email, team_id, source)
+    if token:
+        mail.send_confirm_link(email, token, days=service.CONFIRM_TTL_DAYS)
 
 
 @router.post("/signup")
@@ -535,9 +546,48 @@ def signup(body: SignupRequest, request: Request, deps: Deps = Depends(get_deps)
     # they own. Unlimited, that is a mail bomb pointed at a third party and a
     # bounce-rate problem pointed at our sending domain. The cap is the floor, not
     # the fix — double opt-in is the fix (docs/AUDIT.md, Stage B requirements).
+    #
+    # DOUBLE OPT-IN LANDED 2026-08-06, so the fix is now in place: the address
+    # joins as `tier='pending'` and `api.send` will not mail it until someone
+    # clicks the confirm link. The blast radius of abusing this route is now one
+    # confirmation email that expires in seven days, rather than a permanent list
+    # entry and a weekly brief. The rate cap stays — one unwanted email is still
+    # one too many at volume.
     _enforce_request_budget(request)
     _safe_signup(deps, body.email, body.team_id, body.source)
+    # The response does not say whether the address was new, already confirmed or
+    # an unsubscribe tombstone. All three answer {"ok": true}, because a route
+    # that distinguishes them is a membership oracle for any address you can
+    # type — the same rule the magic-link route follows.
     return {"ok": True}
+
+
+@router.get("/signup/confirm")
+def signup_confirm(request: Request, token: str = "", deps: Deps = Depends(get_deps)):
+    """Consume a double opt-in link and redirect into the web app.
+
+    Redirects rather than returning JSON for the same reason `/auth/verify` does:
+    this URL is clicked in a mail client, so the caller is a browser expecting a
+    page. There is no session and no cookie here — confirming an address proves
+    the address is readable, which is not the same as proving who is reading it,
+    and quietly signing someone in from a link in their inbox would be a
+    different and much larger promise.
+
+    Rate limited on IP: the token is 32 bytes of CSPRNG so guessing is hopeless,
+    but an unlimited endpoint that hits the database per call is still free work
+    for anyone who wants it.
+    """
+    from fastapi.responses import RedirectResponse
+
+    auth_verify_limiter.enforce(deps.session_factory,
+                                f"confirm:ip:{_client_ip(request)}")
+    web = settings.public_web_url.rstrip("/")
+    outcome, email = service.confirm_signup(deps, token)
+    if outcome == "confirmed" and email:
+        # NOW the welcome is earned. Sending it at signup would have mailed an
+        # address that never confirmed, which is the thing being fixed.
+        mail.send_welcome(email)
+    return RedirectResponse(f"{web}/?confirmed={outcome}", status_code=303)
 
 
 # --- 1.6 checkout ----------------------------------------------------------
@@ -1078,6 +1128,12 @@ def admin_sync(_: None = Depends(_require_admin), deps: Deps = Depends(get_deps)
     # "it only ever grows" is the bug, not what the rows contain.
     with deps.session_factory() as session, session.begin():
         result["auth_rows_purged"] = accounts.purge_expired(session)
+    # Unconfirmed signups older than CONFIRM_TTL_DAYS (double opt-in, 2026-08-06).
+    # These are addresses somebody typed and nobody proved. They were never
+    # mailable, so dropping them changes no delivery — it is a retention rule, and
+    # the strongest one available: an address we should not have is an address we
+    # should not still be storing seven days later.
+    result["unconfirmed_signups_purged"] = service.purge_unconfirmed_signups(deps)
     return result
 
 

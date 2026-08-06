@@ -6,11 +6,12 @@ engine formula — the deterministic/LLM boundary holds at the delivery layer to
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select, update
 
 from fpl.db import SessionLocal
 from fpl.models import (
@@ -29,6 +30,8 @@ from graph.nodes.writer import STUB_MODEL
 from graph.sections import PREVIEW_HEADERS, gate_sections, split_sections
 from graph.state import BriefState, RequestCtx
 from writer.generic import render_generic_stub
+
+log = logging.getLogger(__name__)
 
 _POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
@@ -471,17 +474,146 @@ def signup(deps: Deps, email: str, team_id: int | None, source: str | None) -> N
 
     So: insert on first sight, and afterwards only fill in what is still empty.
     Tier is never written here at all; billing owns it.
+
+    DOUBLE OPT-IN (2026-08-06). Returns the plaintext confirm token to mail, or
+    None when there is nothing to send. A new row lands as `tier='pending'` with
+    `confirmed_at` NULL, and `api.send` will not mail it until that changes.
     """
+    now = datetime.now(timezone.utc)
     with deps.session_factory() as session, session.begin():
         row = session.get(EmailSignup, email)
         if row is None:
-            session.add(EmailSignup(email=email, fpl_team_id=team_id,
-                                    tier="free", source=source))
-            return
+            token = accounts.new_token()
+            session.add(EmailSignup(
+                email=email, fpl_team_id=team_id, tier="pending", source=source,
+                created_at=now, confirm_token_hash=accounts.hash_token(token)))
+            return token
+
         if row.fpl_team_id is None and team_id is not None:
             row.fpl_team_id = team_id
         if row.source is None and source is not None:
             row.source = source
+
+        if row.confirmed_at is not None:
+            return None            # already proved; nothing to confirm
+        if row.unsubscribed_at is not None:
+            # A tombstone. Re-signing up does not resurrect it (§1.8) and it
+            # certainly does not earn them another email — the last thing this
+            # address asked us for was silence.
+            return None
+
+        # Unconfirmed: reissue. Covers the ordinary "it never arrived" case, and
+        # a fresh token each time means a leaked old one stops working.
+        token = accounts.new_token()
+        row.confirm_token_hash = accounts.hash_token(token)
+        if _confirm_expired(row, now):
+            # The 7 days ran out and they came back. This is a new signup in
+            # everything but primary key, so restart the clock. The
+            # fill-blanks-only rule above protects data the subscriber EARNED
+            # (their team id, how they found us, what they paid) — it was never
+            # meant to freeze the expiry clock on a row nobody confirmed.
+            row.created_at = now
+        return token
+
+
+# How long an unconfirmed signup lives. A module constant rather than a setting:
+# an operator has no reason to tune this, and every knob in config.py is one more
+# thing that can be wrong in a deploy. Lengthening it is a code change with a
+# reviewer, which is the right weight for "how long we keep an address nobody
+# confirmed".
+CONFIRM_TTL_DAYS = 7
+
+
+def _confirm_expired(row: EmailSignup, now: datetime) -> bool:
+    created = row.created_at
+    if created is None:
+        return False
+    if created.tzinfo is None:          # SQLite hands back naive datetimes
+        created = created.replace(tzinfo=timezone.utc)
+    return created < now - timedelta(days=CONFIRM_TTL_DAYS)
+
+
+def purge_unconfirmed_signups(deps: Deps, *, now: datetime | None = None) -> int:
+    """Delete signups that were never confirmed within CONFIRM_TTL_DAYS.
+
+    A real DELETE, not a tombstone — and the distinction matters here in the
+    opposite direction to §1.8. An unsubscribe leaves a tombstone so a later
+    re-import cannot silently re-add someone who asked to leave. An unconfirmed
+    row is the reverse case: nobody ever asserted they wanted it, so there is no
+    instruction to preserve, and keeping a hash of "someone typed this address
+    once" forever is the thing to avoid rather than protect.
+
+    Confirmed and unsubscribed rows are untouched, whatever their age.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=CONFIRM_TTL_DAYS)
+    with deps.session_factory() as session, session.begin():
+        return session.execute(
+            delete(EmailSignup).where(
+                EmailSignup.confirmed_at.is_(None),
+                EmailSignup.unsubscribed_at.is_(None),
+                EmailSignup.created_at < cutoff,
+            )).rowcount or 0
+
+
+def confirm_signup(deps: Deps, token: str) -> tuple[str, str | None]:
+    """Consume a confirm link. Returns (outcome, email).
+
+    Outcome is 'confirmed' | 'already' | 'invalid'; the address comes back with
+    it so the caller can send the welcome without a second lookup, and is None
+    when there is no row to name.
+
+    SINGLE USE is the atomic UPDATE below being conditional on `confirmed_at IS
+    NULL` — the state transition happens exactly once even if two clicks race,
+    because the database decides the winner, not a read-then-write in Python.
+
+    An expired link answers 'invalid', identically to a forged one: the holder of
+    a token learns nothing about whether it was ever real. The row is left alone
+    rather than deleted, so `purge_expired` can reap it on its own schedule and a
+    re-signup can restart the clock on the same address.
+
+    'already' is answered honestly rather than folded into 'invalid'. A second
+    click is overwhelmingly a real person double-tapping a link they genuinely
+    received, and telling them their link is invalid is a lie that costs a
+    support email.
+    """
+    if not token:
+        return "invalid", None
+    digest = accounts.hash_token(token)
+    now = datetime.now(timezone.utc)
+
+    with deps.session_factory() as session, session.begin():
+        row = session.scalar(
+            select(EmailSignup).where(EmailSignup.confirm_token_hash == digest))
+        if row is None:
+            return "invalid", None
+        email = row.email
+        if row.confirmed_at is not None:
+            return "already", email
+        if _confirm_expired(row, now):
+            log.info("signup: confirm link expired email_hash=%s",
+                     accounts.mask(email))
+            return "invalid", None
+        if row.unsubscribed_at is not None:
+            # They asked to leave between signing up and clicking. The click does
+            # not override the tombstone (§1.8) — honouring the later instruction
+            # is the whole point of keeping one.
+            return "invalid", None
+
+        claimed = session.execute(
+            update(EmailSignup)
+            .where(EmailSignup.email == row.email,
+                   EmailSignup.confirmed_at.is_(None))
+            # Never demote a paying subscriber. `tier` is written 'paid' only by
+            # the verified webhook, and a confirm click must not undo it —
+            # someone who bought before confirming is still a customer.
+            .values(confirmed_at=now,
+                    tier=case((EmailSignup.tier == "paid", "paid"), else_="free"))
+        ).rowcount
+        if not claimed:
+            return "already", email   # lost the race; the other click won
+        log.info("signup: address confirmed email_hash=%s", accounts.mask(email))
+        return "confirmed", email
 
 
 # --- mail consent (§1.8) ---------------------------------------------------

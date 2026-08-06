@@ -135,16 +135,46 @@ def _finish(deps: Deps, email: str, gameweek: int, template: str,
 # --- recipients -------------------------------------------------------------
 
 def _mailable_free_signups(session) -> list[EmailSignup]:
-    """Free, not unsubscribed. FILTERED IN THE QUERY, not in Python afterwards.
+    """Free, CONFIRMED, not unsubscribed. FILTERED IN THE QUERY, not in Python.
 
     docs/AUDIT.md §D5: loading the list and filtering in a loop is how someone who
     unsubscribed gets mailed by the one code path that forgot the `if`.
+
+    `confirmed_at IS NOT NULL` (double opt-in, 2026-08-06) is the whole of the
+    "never mail an unconfirmed address" rule, and it is one clause here rather
+    than a check at each call site for exactly the reason above. This is the ONLY
+    place free recipients are enumerated.
+
+    Note the direction: it tests for a confirmation that IS there, not for the
+    absence of a pending flag. An address that somehow acquired a state nobody
+    anticipated is not mailed, which is the safe way round — the same
+    allow-list-not-deny-list rule the section vocabulary runs on.
+
+    Paid recipients do not come through here at all: `_send_paid` reads
+    `subscriptions`, and someone who has paid us money has proved the address as
+    thoroughly as a click ever could.
     """
     return list(session.scalars(
         select(EmailSignup).where(
             EmailSignup.unsubscribed_at.is_(None),
+            EmailSignup.confirmed_at.is_not(None),
             EmailSignup.tier != "paid",
         ).order_by(EmailSignup.email)))
+
+
+def _mailable_free(session, email: str) -> bool:
+    """Is this ONE address still eligible for the free send?
+
+    The single-address form of `_mailable_free_signups`' WHERE clause, for the
+    retry path — which reads `send_log` and so cannot re-run the list query.
+    Deliberately expressed as the same three conditions rather than "not
+    pending": a state nobody anticipated is not mailed.
+    """
+    row = session.get(EmailSignup, email)
+    return bool(row
+                and row.unsubscribed_at is None
+                and row.confirmed_at is not None
+                and row.tier != "paid")
 
 
 def _is_unsubscribed(session, email: str) -> bool:
@@ -323,7 +353,26 @@ def retry_failed(deps: Deps, gameweek: int, *, send_fn=None) -> SendResult:
 
 def _rebuild(deps: Deps, email: str, gameweek: int,
              template: str) -> tuple[str, str, str] | None:
-    """Re-render one email for a retry. None if its content no longer exists."""
+    """Re-render one email for a retry. None if it must not be sent after all.
+
+    CONSENT IS RE-CHECKED HERE, not only at claim time (2026-08-06). A retry runs
+    an hour after the batch and reads `send_log`, which is a record of what we
+    TRIED to send — it is not a permission. Between the two, someone can hit
+    unsubscribe, and before this guard the one-click unsubscribe they were
+    legally required to be offered would have been overridden by a retry an hour
+    later. Double opt-in made the same hole wider: a row claimed while an address
+    was confirmed must not be redelivered if the confirmation is gone.
+
+    This sits in `_rebuild` rather than in `retry_failed`'s loop because both
+    templates funnel through here, so one guard covers both paths — and a future
+    third template gets it for free instead of needing to remember.
+    """
+    with deps.session_factory() as session:
+        if _is_unsubscribed(session, email):
+            return None
+        if template == FREE_TEMPLATE and not _mailable_free(session, email):
+            return None
+
     if template == FREE_TEMPLATE:
         with deps.session_factory() as session:
             preview = session.scalars(

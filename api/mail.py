@@ -163,6 +163,57 @@ def send_magic_link(email: str, token: str, *, next_path: str = "/") -> bool:
         return False
 
 
+def send_confirm_link(email: str, token: str, *, days: int = 7) -> bool:
+    """Mail a double opt-in confirmation link. Never raises into the request path.
+
+    WITH NO `RESEND_API_KEY` THE LINK IS LOGGED IN FULL, exactly as
+    `send_magic_link` does it and for the same reason: only the SHA-256 is
+    stored, so a link that is neither mailed nor printed cannot be recovered and
+    no address could ever be confirmed locally. WARNING rather than INFO because
+    uvicorn's default config gives this module's logger no handler, and an
+    unprinted link is the same as no link.
+
+    Points at the API, not the web app: the route that consumes it is here, and
+    bouncing through Next.js first would put a single-use token through two hops.
+
+    Carries no `List-Unsubscribe`. This is transactional — it is the one message
+    we send to an address that has NOT yet confirmed, and it exists precisely to
+    ask permission. An unsubscribe header on it would offer to remove someone
+    from a list they are not on yet.
+    """
+    api = settings.public_api_url.rstrip("/")
+    url = f"{api}/api/signup/confirm?token={token}"
+
+    if not settings.resend_api_key:
+        log.warning("mail: RESEND_API_KEY unset — confirm link for %s: %s",
+                    mask(email), url)
+        return False
+
+    html = (
+        "<div style=\"font-family:system-ui,sans-serif;max-width:520px\">"
+        "<h2>Confirm your email</h2>"
+        "<p>Tap below and you'll get one FPL brief a week. Nothing else.</p>"
+        f'<p><a href="{url}">Confirm this address →</a></p>'
+        f"<p style=\"color:#666;font-size:13px\">The link expires in {days} days. "
+        "If you didn't ask for this, ignore it — we won't email you again, and "
+        "the address is removed automatically.</p>"
+        "</div>"
+    )
+    text = (
+        "Confirm your email\n\n"
+        "Tap below and you'll get one FPL brief a week. Nothing else.\n\n"
+        f"{url}\n\n"
+        f"The link expires in {days} days.\n"
+        "If you didn't ask for this, ignore it — we won't email you again."
+    )
+    try:
+        return send(to=email, subject="Confirm your email — FPL Analyst",
+                    html=html, text=text)
+    except MailError as exc:
+        log.warning("mail: confirm link to %s failed: %s", mask(email), exc)
+        return False
+
+
 def send_welcome(email: str, *, brief_url: str | None = None) -> bool:
     """Send the welcome email. Returns True if dispatched, False if skipped/no-op.
 

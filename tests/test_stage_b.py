@@ -848,7 +848,14 @@ def _seed_send_world(SF, *, gw=5, free=("f1@example.com", "f2@example.com"),
                            current_period_end=datetime.now(timezone.utc)
                            + timedelta(days=30)))
         for addr in free:
-            s.add(EmailSignup(email=addr, tier="free"))
+            # `confirmed_at` set (double opt-in, 2026-08-06): these fixtures model
+            # people who are ON the list, and since 2026-08-06 that means they
+            # clicked a confirm link. Without it `_mailable_free_signups` correctly
+            # returns nothing and every send test here fails — which is the filter
+            # working, not the fixture being awkward. The unconfirmed case has its
+            # own test (test_an_unconfirmed_address_is_never_mailed).
+            s.add(EmailSignup(email=addr, tier="free",
+                              confirmed_at=datetime.now(timezone.utc)))
     return deps
 
 
@@ -944,6 +951,174 @@ def test_an_unsubscribed_free_reader_is_not_mailed(sf):
     send.run_batch(deps, 5, send_fn=fake)
     assert "gone@example.com" not in {m["to"] for m in fake.sent}
     assert "stay@example.com" in {m["to"] for m in fake.sent}
+
+
+# ===========================================================================
+# Double opt-in (2026-08-06)
+#
+# POST /api/signup is public and unauthenticated, so until now anyone could put
+# a stranger's address on the list. An address is 'pending' until someone proves
+# they can read it, and `api.send` never mails a pending one.
+# ===========================================================================
+
+def test_an_unconfirmed_address_is_never_mailed(sf):
+    """The whole point. `confirmed_at IS NULL` = not on the list.
+
+    Filtered in the query (`_mailable_free_signups`), not in a loop — docs/AUDIT
+    §D5 is about exactly this class of miss.
+    """
+    deps = _seed_send_world(sf, free=("confirmed@example.com",))
+    with sf() as s, s.begin():
+        s.add(EmailSignup(email="pending@example.com", tier="pending"))
+
+    fake = FakeMail()
+    send.run_batch(deps, 5, send_fn=fake)
+
+    to = {m["to"] for m in fake.sent}
+    assert "pending@example.com" not in to, "an unconfirmed address was mailed"
+    assert "confirmed@example.com" in to
+    # And nothing was even claimed for them — an unmailed address must not leave
+    # a send_log row implying it was tried.
+    with sf() as s:
+        assert not [r for r in s.scalars(select(SendLog))
+                    if r.email == "pending@example.com"]
+
+
+def test_confirming_moves_an_address_onto_the_list(sf):
+    deps = _seed_send_world(sf, free=())
+    token = service.signup(deps, "new@example.com", None, "landing")
+    assert token, "signup did not issue a confirm token"
+
+    with sf() as s:
+        row = s.get(EmailSignup, "new@example.com")
+        assert row.tier == "pending" and row.confirmed_at is None
+
+    outcome, email = service.confirm_signup(deps, token)
+    assert (outcome, email) == ("confirmed", "new@example.com")
+
+    with sf() as s:
+        row = s.get(EmailSignup, "new@example.com")
+        assert row.tier == "free" and row.confirmed_at is not None
+
+    fake = FakeMail()
+    send.run_batch(deps, 5, send_fn=fake)
+    assert "new@example.com" in {m["to"] for m in fake.sent}
+
+
+def test_a_confirm_link_works_exactly_once(sf):
+    """Single use is the conditional UPDATE, so two clicks cannot both transition.
+
+    The second click answers 'already' rather than 'invalid': it is overwhelmingly
+    a real person double-tapping a link they genuinely received, and calling that
+    invalid is a lie that costs a support email.
+    """
+    deps = _seed_send_world(sf, free=())
+    token = service.signup(deps, "twice@example.com", None, None)
+
+    assert service.confirm_signup(deps, token)[0] == "confirmed"
+    with sf() as s:
+        first = s.get(EmailSignup, "twice@example.com").confirmed_at
+
+    assert service.confirm_signup(deps, token)[0] == "already"
+    with sf() as s:
+        assert s.get(EmailSignup, "twice@example.com").confirmed_at == first, \
+            "the second click moved the confirmation timestamp"
+
+    assert service.confirm_signup(deps, "not-a-real-token")[0] == "invalid"
+
+
+def test_an_expired_confirm_link_does_not_work(sf):
+    """Seven days, and then the address is not ours to keep."""
+    deps = _seed_send_world(sf, free=())
+    token = service.signup(deps, "slow@example.com", None, None)
+
+    stale = datetime.now(timezone.utc) - timedelta(days=service.CONFIRM_TTL_DAYS + 1)
+    with sf() as s, s.begin():
+        s.get(EmailSignup, "slow@example.com").created_at = stale
+
+    assert service.confirm_signup(deps, token)[0] == "invalid"
+    with sf() as s:
+        assert s.get(EmailSignup, "slow@example.com").confirmed_at is None
+
+    # And the sweep reaps it.
+    assert service.purge_unconfirmed_signups(deps) == 1
+    with sf() as s:
+        assert s.get(EmailSignup, "slow@example.com") is None
+
+
+def test_the_sweep_spares_confirmed_and_unsubscribed_rows(sf):
+    """Only rows nobody ever confirmed are dropped, however old they get.
+
+    An unsubscribe tombstone in particular must survive: deleting it is how a
+    later re-import silently re-adds someone who asked to leave (§1.8).
+    """
+    deps = _seed_send_world(sf, free=())
+    old = datetime.now(timezone.utc) - timedelta(days=400)
+    with sf() as s, s.begin():
+        s.add(EmailSignup(email="old-confirmed@example.com", tier="free",
+                          created_at=old, confirmed_at=old))
+        s.add(EmailSignup(email="old-gone@example.com", tier="pending",
+                          created_at=old, unsubscribed_at=old))
+        s.add(EmailSignup(email="old-pending@example.com", tier="pending",
+                          created_at=old))
+
+    assert service.purge_unconfirmed_signups(deps) == 1
+    with sf() as s:
+        assert s.get(EmailSignup, "old-confirmed@example.com") is not None
+        assert s.get(EmailSignup, "old-gone@example.com") is not None
+        assert s.get(EmailSignup, "old-pending@example.com") is None
+
+
+def test_signup_never_resurrects_an_unsubscribe(sf):
+    """Re-signing up does not restart mail to someone who opted out, and does not
+    earn them a confirmation email either — the last thing that address asked us
+    for was silence."""
+    deps = _seed_send_world(sf, free=("gone@example.com",))
+    service.unsubscribe(deps, "gone@example.com")
+
+    assert service.signup(deps, "gone@example.com", None, "landing") is None
+
+    fake = FakeMail()
+    send.run_batch(deps, 5, send_fn=fake)
+    assert "gone@example.com" not in {m["to"] for m in fake.sent}
+
+
+def test_confirming_does_not_demote_a_paying_subscriber(sf):
+    """`tier='paid'` is written only by the verified webhook. Someone who bought
+    before clicking confirm is still a customer."""
+    deps = _seed_send_world(sf, free=())
+    token = service.signup(deps, "buyer@example.com", None, None)
+    with sf() as s, s.begin():
+        s.get(EmailSignup, "buyer@example.com").tier = "paid"
+
+    assert service.confirm_signup(deps, token)[0] == "confirmed"
+    with sf() as s:
+        assert s.get(EmailSignup, "buyer@example.com").tier == "paid"
+
+
+def test_a_retry_re_checks_consent(sf):
+    """`send_log` records what we TRIED to send; it is not a permission.
+
+    A retry runs an hour after the batch. Before 2026-08-06 it re-sent from the
+    log without re-reading consent, so a one-click unsubscribe made in that hour
+    was overridden by the retry — the guard now lives in `_rebuild`, where both
+    templates funnel through it.
+    """
+    deps = _seed_send_world(sf, free=("quit@example.com",))
+    fake = FakeMail(fail_for={"quit@example.com"})
+    send.run_batch(deps, 5, send_fn=fake)
+    assert any(r.status == "failed" for r in _send_log_rows(sf, "quit@example.com"))
+
+    service.unsubscribe(deps, "quit@example.com")
+
+    again = FakeMail()
+    send.retry_failed(deps, 5, send_fn=again)
+    assert "quit@example.com" not in {m["to"] for m in again.sent}
+
+
+def _send_log_rows(SF, email):
+    with SF() as s:
+        return [r for r in s.scalars(select(SendLog)) if r.email == email]
 
 
 def test_an_unsubscribed_paid_subscriber_stops_mail_but_keeps_access(sf, monkeypatch):

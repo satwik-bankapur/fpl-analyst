@@ -286,9 +286,38 @@ class EmailSignup(Base):
 
     email: Mapped[str] = mapped_column(Text, primary_key=True)
     fpl_team_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    tier: Mapped[str] = mapped_column(Text, default="free")  # 'free' / 'paid'
+    # 'pending' / 'free' / 'paid'. 'pending' (double opt-in, 2026-08-06) is the
+    # state a fresh signup lands in: the address was typed, but nobody has proved
+    # they can read it. It becomes 'free' on confirmation and 'paid' only via the
+    # verified webhook. Still a SEND-ROUTING discriminator and never an
+    # entitlement source — `subscriptions` remains the only source of truth for
+    # paid access (see the Subscription docstring below).
+    tier: Mapped[str] = mapped_column(Text, default="pending")
     source: Mapped[str | None] = mapped_column(Text, nullable=True)  # acquisition tracking
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # --- double opt-in (2026-08-06) ---------------------------------------
+    # PROOF THE ADDRESS BELONGS TO WHOEVER TYPED IT. `POST /api/signup` is public
+    # and unauthenticated: without this, anyone can put a stranger's address on
+    # our mailing list, which is a mail bomb pointed at them and a spam-rate
+    # problem pointed at our sending domain (docs/AUDIT.md; the route has carried
+    # a comment naming double opt-in as the fix since Stage B).
+    #
+    # NULL = unconfirmed. `api.send` never mails a NULL, in the query rather than
+    # in a loop. There is no separate confirmations table: the token is one
+    # column here because its lifetime is exactly this row's lifetime, and a
+    # second table would need its own sweep.
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # SHA-256 of the confirm token; the plaintext exists only in the email (or,
+    # unkeyed, in the log line). Same rule as `magic_link_tokens` and `sessions`:
+    # a database leak must not yield a usable link.
+    #
+    # NOT cleared on confirmation. Single-use is enforced by the atomic UPDATE
+    # in `service.confirm_signup` being conditional on `confirmed_at IS NULL`, so
+    # the state transition happens exactly once — while a second click on the
+    # same link can still be recognised and answered "already confirmed" rather
+    # than the lie that a link the user really did receive was never valid.
+    confirm_token_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     # MAIL consent, not billing state. Set by the one-click unsubscribe (§1.8).
     # A TOMBSTONE, not a delete: without the row, the next signup form submission or
     # CSV re-import silently re-adds someone who asked to leave. The delete path

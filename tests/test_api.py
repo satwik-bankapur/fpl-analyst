@@ -476,14 +476,76 @@ def test_cache_hits_do_not_count(golden_sf, client_for):
 # Signup (§1.5) + Resend welcome (mocked)
 # ===========================================================================
 
-def test_signup_persists_and_sends_welcome(golden_sf, client_for, monkeypatch):
-    sent = []
-    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: sent.append(email) or True)
+def test_signup_persists_and_sends_a_confirm_link(golden_sf, client_for, monkeypatch):
+    """Double opt-in (2026-08-06): signup asks, it does not welcome.
+
+    This test used to assert a welcome email went out here. It deliberately does
+    not any more — a welcome to an address nobody proved they can read is the
+    exact message double opt-in exists to stop. The welcome now fires on
+    confirmation (see test_confirming_sends_the_welcome).
+    """
+    confirms, welcomes = [], []
+    monkeypatch.setattr(mail, "send_confirm_link",
+                        lambda email, token, **kw: confirms.append((email, token)) or True)
+    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: welcomes.append(email) or True)
+
     r = client_for(golden_sf).post("/api/signup", json={"email": "fan@example.com"})
     assert r.status_code == 200 and r.json() == {"ok": True}
-    assert sent == ["fan@example.com"]
+    assert [e for e, _ in confirms] == ["fan@example.com"]
+    assert welcomes == [], "a welcome must not precede the confirmation"
+
     with golden_sf() as s:
-        assert s.get(EmailSignup, "fan@example.com") is not None
+        row = s.get(EmailSignup, "fan@example.com")
+        assert row is not None
+        assert row.tier == "pending"
+        assert row.confirmed_at is None
+        assert row.confirm_token_hash, "no token was stored to confirm against"
+
+
+def test_confirming_sends_the_welcome(golden_sf, client_for, monkeypatch):
+    """The welcome moved here from signup. This is the moment it is earned."""
+    tokens_sent, welcomes = [], []
+    monkeypatch.setattr(mail, "send_confirm_link",
+                        lambda email, token, **kw: tokens_sent.append(token) or True)
+    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: welcomes.append(email) or True)
+    client = client_for(golden_sf)
+
+    client.post("/api/signup", json={"email": "fan@example.com"})
+    assert welcomes == []
+
+    r = client.get(f"/api/signup/confirm?token={tokens_sent[0]}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/?confirmed=confirmed")
+    assert welcomes == ["fan@example.com"]
+
+    with golden_sf() as s:
+        assert s.get(EmailSignup, "fan@example.com").tier == "free"
+
+
+def test_a_bad_confirm_token_redirects_without_saying_why(golden_sf, client_for):
+    """Forged, expired and already-consumed must not be distinguishable to the
+    holder of a token — the same rule /auth/verify follows."""
+    r = client_for(golden_sf).get("/api/signup/confirm?token=nope", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/?confirmed=invalid")
+
+
+def test_confirming_never_signs_anyone_in(golden_sf, client_for, monkeypatch):
+    """Proving an address is readable is not proving who is reading it.
+
+    A link in an inbox is forwardable, and quietly minting a session from one
+    would be a much larger promise than this route makes.
+    """
+    tokens_sent = []
+    monkeypatch.setattr(mail, "send_confirm_link",
+                        lambda email, token, **kw: tokens_sent.append(token) or True)
+    monkeypatch.setattr(mail, "send_welcome", lambda *a, **kw: True)
+    client = client_for(golden_sf)
+
+    client.post("/api/signup", json={"email": "fan@example.com"})
+    r = client.get(f"/api/signup/confirm?token={tokens_sent[0]}", follow_redirects=False)
+    assert "set-cookie" not in {k.lower() for k in r.headers}
+    assert client.get("/api/auth/me").json()["signed_in"] is False
 
 
 def test_signup_rejects_bad_email(golden_sf, client_for):
@@ -1242,11 +1304,17 @@ def test_replayed_brief_posts_stop_creating_draft_rows(golden_sf, client_for):
     assert rows < 40
 
 
-def test_signup_is_rate_limited_so_the_welcome_mail_cannot_be_weaponised(
+def test_signup_is_rate_limited_so_the_confirm_mail_cannot_be_weaponised(
         golden_sf, client_for, monkeypatch):
-    """POST /api/signup mails an address the caller never proved they own."""
+    """POST /api/signup mails an address the caller never proved they own.
+
+    Double opt-in shrank the blast radius — the worst case is now one expiring
+    confirmation rather than a permanent list entry and a weekly brief — but one
+    unwanted email is still one too many at volume, so the cap stays.
+    """
     sent = []
-    monkeypatch.setattr(mail, "send_welcome", lambda email, **kw: sent.append(email) or True)
+    monkeypatch.setattr(mail, "send_confirm_link",
+                        lambda email, token, **kw: sent.append(email) or True)
     client = client_for(golden_sf)
 
     codes = [client.post("/api/signup", json={"email": "victim@example.com"}).status_code
