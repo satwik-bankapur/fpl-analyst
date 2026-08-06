@@ -418,7 +418,9 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"      # Windows
 # .venv/bin/python -m pip install -e ".[dev]"        # Linux/macOS
 
-.venv/Scripts/python -m pytest -q                    # expect 124 passed
+.venv/Scripts/python -m pytest -q                    # expect 467 passed
+.venv/Scripts/python scripts/smoke.py                # the whole thing, end to end (below)
+
 .venv/Scripts/python -m fpl init-db                  # Alembic migrations, once
 .venv/Scripts/python -m fpl sync                     # LIVE FPL API → scores → ep_scores
 .venv/Scripts/python -m fpl mode                     # derived mode + next GW
@@ -434,6 +436,41 @@ npm --prefix web run dev                             # http://localhost:3000
 
 Useful pages: `/` (landing + draft picker), `/story` (renders every component state
 including the **only** exercise of `LockCard`), `/brief/draft/<uuid>`.
+
+### `scripts/smoke.py` — one command that proves the whole local stack
+
+Added 2026-08-05. It is `docs/GO-LIVE.md` **step 0**, and the fastest way for a returning
+developer to find out what still works.
+
+```bash
+.venv/Scripts/python scripts/smoke.py              # live FPL API for the sync
+.venv/Scripts/python scripts/smoke.py --offline    # frozen snapshot instead — no network
+.venv/Scripts/python scripts/smoke.py --keep       # keep the scratch dir + server logs
+```
+
+~15 seconds, zero spend, no browser, no external provider. Against a throwaway SQLite
+file it runs `init-db` → `backfill-archive` → `sync`, then starts a **real uvicorn
+process** and drives the **real HTTP surface** with a real cookie jar. One `PASS`/`FAIL`
+line per check; exit 0 only if every one passed. Roughly 42 checks covering:
+
+| Area | What is asserted |
+|---|---|
+| Fresh DB | Migrations apply; backfill writes 841 rows; sync writes players + ep_scores; **the top-20 is a position mix** — the empty-archive/all-goalkeepers trap, caught automatically |
+| Free funnel | Draft brief, cached re-read, `/api/players`; an anonymous read of a paid team's brief is **200 with sections locked** — never 401, never a `/login` redirect |
+| Auth | Magic link requested, logged, consumed; session cookie; `/api/auth/me`; accept-terms; logout deletes the row; account deletion |
+| Failure paths | Link replay, garbage token, malformed address, bad draft (`squad_size`, `duplicate_players`), unknown draft/team 404s, anonymous writes → 401, admin 401 on missing/wrong token |
+| Paywall | A second server with `PAYWALL_ENABLED=true`: locked for anonymous, unlocked for an entitled account, re-locked on a stale terms version (200, never 403), locked for `past_due` and for an unrecognised Paddle status |
+| Fail-closed boot | A third launch with `PAYWALL_ENABLED=true` and an empty `BRIEF_TOKEN_SECRET` that **must die on startup** |
+
+**Two limits, stated because a green gate is easy to over-read.** Paddle's effect is
+*seeded* into `subscriptions` — no provider is contacted, so this proves our side of the
+boundary and nothing about the boundary (§10.4 is unchanged by it). And it runs on SQLite;
+Postgres is GO-LIVE step 2.
+
+**It also depends on one deliberate behaviour:** with `RESEND_API_KEY` unset,
+`mail.send_magic_link` logs the sign-in link **in full, token included**, at WARNING. It
+has to — `magic_link_tokens` stores only a SHA-256, so an unmailed, unlogged link is
+unrecoverable and local sign-in is impossible. The branch cannot fire once a key is set.
 
 ⚠️ **The `.claude/skills/run-fpl-analyst/driver.py` offline driver is gitignored and will
 NOT be in a fresh clone.** Without it there is no offline path to exercise Layers 1–2

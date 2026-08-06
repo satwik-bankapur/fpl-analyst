@@ -27,6 +27,7 @@ variable is **`FPL_DATABASE_URL`**.
 
 | # | Step | Blocks | Can you skip it? |
 |---|---|---|---|
+| 0 | **`scripts/smoke.py`** — the local pre-deploy gate | Everything. Run it before you spend a penny | **No** |
 | 1 | Buy the domain | DNS, Google OAuth, Resend, Paddle live | No |
 | 2 | Neon (Postgres) | Render — the API cannot boot without a DB | No |
 | 3 | Render (API) | Vercel, GitHub cron, every webhook | No |
@@ -44,6 +45,69 @@ variable is **`FPL_DATABASE_URL`**.
 Steps 1–3 are strictly sequential. Steps 8 and 9 are independent of each other and of
 10–12; do them in whatever order suits you, as long as 8 lands before you flip
 `SEND_ENABLED` and 11 lands before you submit to Paddle for live review.
+
+---
+
+## Step 0 — The pre-deploy gate (`scripts/smoke.py`)
+
+**Blocks:** everything. Run it on the commit you are about to deploy, before you buy a
+domain, and again any time a later step sends you back to the code.
+
+**Do:**
+
+```bash
+.venv/Scripts/python -m pytest -q            # 467 passed — the units and the seams
+.venv/Scripts/python scripts/smoke.py        # the gate — expect ALL CHECKS PASSED
+```
+
+**Cost: zero.** No browser, no Paddle, no Google, no Resend, no LLM, nothing deployed.
+The only network call is the FPL public API for the sync; `--offline` swaps in the frozen
+snapshot and removes even that. `--keep` keeps the scratch directory and both server logs.
+
+**What it actually does**, in ~15 seconds, all against a throwaway SQLite file:
+
+1. **A database from nothing** — `init-db`, then `backfill-archive`, then `sync`, in that
+   order, and asserts the top-20 EP list is a position mix. That last assertion is step 4's
+   entire failure mode caught locally: a fresh DB with an empty `players_archive` scores
+   every player onto the position/price baseline and recommends a goalkeeper as captain,
+   with nothing erroring.
+2. **The real HTTP surface** — it starts an actual `uvicorn` process and drives it with a
+   real cookie jar. `pytest` never opens a socket and never runs a migration; this is the
+   layer between "the tests pass" and "the deploy works".
+3. **The free funnel stays open** — anonymous brief generation, the draft path, and an
+   anonymous read of a paid team's brief returning **200 with sections locked**, never a
+   401 and never a redirect to `/login`.
+4. **Magic-link login end to end** — request, consume, session cookie, `/api/auth/me`,
+   terms acceptance, logout, account deletion. Plus the failure paths: replay, garbage
+   token, malformed address, anonymous writes → 401.
+5. **The paywall, both ways** — a second server with `PAYWALL_ENABLED=true`, checking that
+   paid sections lock for anonymous readers, unlock for an entitled account, re-lock when
+   the terms version goes stale (200, never 403), and stay locked for `past_due` and for an
+   unrecognised Paddle status.
+6. **Admin auth** — no token, wrong token, right token.
+7. **Fail-closed boot** — a third launch with `PAYWALL_ENABLED=true` and an empty
+   `BRIEF_TOKEN_SECRET` that **must die on startup**. Only observable as a dead process,
+   which is why it is a check rather than a test.
+
+**Two things it deliberately does not prove**, and cannot from here:
+
+- **No provider is contacted.** Paddle's effect on our tables is *seeded* — an entitled
+  account and an `active` subscription written directly. That exercises our side of the
+  boundary, which is all this repo has ever exercised (`docs/STATUS.md` §10.4). Steps 8–13
+  are where the boundaries themselves get tested.
+- **Postgres is not exercised.** The gate runs on SQLite; Neon is step 2. Anything
+  dialect-specific surfaces there, not here.
+
+**The magic link, locally.** `magic_link_tokens` stores a SHA-256, so a sign-in link that
+is never mailed is unrecoverable. With `RESEND_API_KEY` unset, `mail.send_magic_link`
+therefore **logs the whole link, token included**, at WARNING — which is the only way to
+sign in on localhost, and how the gate gets its token. That branch is unreachable once a
+key is set, so it never fires in a deployment. Don't "harden" it away; local login goes
+with it.
+
+**Verify:** the last line is `ALL CHECKS PASSED`. Exit code is 0 only if every check
+passed; any failure lists the check names and leaves the scratch directory and server logs
+in place.
 
 ---
 

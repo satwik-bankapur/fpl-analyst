@@ -118,10 +118,28 @@ def send_magic_link(email: str, token: str, *, next_path: str = "/") -> bool:
     The link points at the API, not the web app: it must be consumed by the route
     that sets the session cookie, and bouncing through Next.js first would mean
     two hops with a single-use token in the middle of them.
+
+    WITH NO `RESEND_API_KEY` THE LINK IS LOGGED IN FULL, token and all. That is
+    the one place in this codebase a live credential reaches a log line, and it is
+    deliberate: `magic_link_tokens` stores only a SHA-256, so a link that is
+    neither mailed nor printed is unrecoverable and local sign-in is impossible.
+    The branch is reachable only when no mail provider is configured — dev, tests,
+    and `scripts/smoke.py`, which reads the link back out of the server log. A
+    deployment with a key never takes it. If you ever want dev mail without dev
+    logs, set the key; do not "harden" this line, it would close local login.
     """
     api = settings.public_api_url.rstrip("/")
     url = f"{api}/api/auth/verify?token={token}&next={quote(next_path, safe='/')}"
     minutes = settings.magic_link_ttl_minutes
+
+    if not settings.resend_api_key:
+        # WARNING, not INFO: under uvicorn's default logging config the root
+        # logger has no handler, so INFO records from this module are dropped and
+        # only WARNING+ reaches stderr via logging.lastResort. An unprinted link
+        # here is the same as no link at all.
+        log.warning("mail: RESEND_API_KEY unset — magic link for %s: %s",
+                    mask(email), url)
+        return False
     html = (
         "<div style=\"font-family:system-ui,sans-serif;max-width:520px\">"
         "<h2>Sign in to FPL Analyst</h2>"
