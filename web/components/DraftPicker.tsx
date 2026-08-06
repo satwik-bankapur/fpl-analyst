@@ -23,9 +23,56 @@ const BUDGET = SQUAD_BUDGET;
 const POS_ORDER: PlayerRow["position"][] = ["GK", "DEF", "MID", "FWD"];
 const POS_CAP = POSITION_QUOTA;
 const POS_GROUP: Record<string, string> = { GK: "Goalkeepers", DEF: "Defenders", MID: "Midfielders", FWD: "Forwards" };
-// ponytail: fixed per-position row cap keeps the DOM small; swap for
-// virtualisation only if the list ever needs to show every player at once.
-const ROWS_PER_POS = 60;
+
+// THE ROW CAP IS GONE (2026-08-06). It was 60 per position, and with 572
+// players that hid 332 of them — 58% — behind a search box that could not find
+// them either (see `fold` below). Sorted price-desc, the cut landed entirely on
+// the cheap end, so every budget enabler and bench filler was unreachable. The
+// old comment said to swap it for virtualisation "only if the list ever needs
+// to show every player at once"; it always did. 572 static rows render fine,
+// and correctness beats a DOM budget nobody was measuring.
+// ponytail: if the pool ever gets big enough to feel slow, virtualise — do not
+// bring the cap back.
+
+// Availability, from `status` on the payload. 'a' and 'd' are pickable without
+// comment; the rest get a visible flag. A player is NEVER hidden for being
+// unavailable — drafting an injured player for the fixture after next is a real
+// strategy, and silently omitting him looks identical to the bug this replaced.
+const UNAVAILABLE: Record<string, string> = {
+  i: "injured",
+  s: "suspended",
+  u: "unavailable",
+  n: "on loan",
+};
+
+// Latin letters that are NOT a base plus a combining mark, so NFD leaves them
+// intact and stripping diacritics does nothing for them. Without this map
+// Ødegaard stays unfindable as "odegaard" and Groß as "gross". Everything else
+// (é, ï, ö, ç, ą…) NFD handles generically.
+const LETTERS: Record<string, string> = {
+  Ø: "o", ø: "o", ß: "ss", Ł: "l", ł: "l", Đ: "d", đ: "d",
+  Ð: "d", ð: "d", ı: "i", Æ: "ae", æ: "ae", Œ: "oe", œ: "oe",
+  Þ: "th", þ: "th",
+};
+
+/** Lowercase and strip diacritics, so "ait" finds Aït-Nouri.
+ *
+ * NFD splits a precomposed letter into its base plus a combining mark, and
+ * \p{Diacritic} matches exactly that mark — so that half is one line, with no
+ * dependency (`web/` has none beyond Next and React, and a transliteration
+ * package for this would be absurd). LETTERS above covers the rest.
+ *
+ * Mirrored by `fold()` in scripts/player_coverage.py — change both together;
+ * tests/test_api.py::test_coverage_diagnostic_still_mirrors_the_picker fails if
+ * they drift.
+ */
+function fold(s: string): string {
+  return s
+    .replace(/[ØøßŁłĐđÐðıÆæŒœÞþ]/g, (c) => LETTERS[c] || c)
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+}
 
 // Design §02: mobile is a full-height sheet, desktop a modal with a squad rail.
 // One tap adds, position caps enforce, over-budget rows dim, the budget bar sits
@@ -65,29 +112,33 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
     }, {})
   ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
+  // Search key per player, folded once and cached — recomputing fold() for 572
+  // players on every keystroke is the one place this gets hot.
+  const keyed = useMemo(
+    () => players.map((p) => ({ p, key: fold(`${p.web_name} ${p.full_name || ""} ${p.team_short}`) })),
+    [players]
+  );
+
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return players.filter((p) => !q || p.web_name.toLowerCase().includes(q) || p.team_short.toLowerCase().includes(q));
-  }, [players, search]);
+    const q = fold(search.trim());
+    return keyed.filter(({ key }) => !q || key.includes(q)).map(({ p }) => p);
+  }, [keyed, search]);
 
   // Group the visible pool by position so the list carries the design's headers.
-  // The row cap is PER GROUP, not global: with ~840 players a flat cap would fill
-  // entirely with goalkeepers and defenders and leave forwards unreachable
-  // without a search. Picked players are always kept in view so they can be
-  // captained or removed even when they fall outside the cap or the search.
+  // Every match is rendered — see the row-cap note at the top of this file.
+  // Picked players are always kept in view so they can be captained or removed
+  // even when they fall outside the current search.
   //
   // Sorted by PRICE DESCENDING (2026-07-30). /api/players returns rows in
   // element-id order, and FPL assigns ids club-by-club alphabetically — so the
-  // old order was effectively "Arsenal first", and the per-group row cap then cut
-  // the list off somewhere in the middle of the alphabet. Every recognisable
-  // player was below the fold. Price desc is also the FPL-familiar default.
+  // old order was effectively "Arsenal first". Price desc is also the
+  // FPL-familiar default.
   const groups = useMemo(() => {
     const pickedIds = new Set(Object.keys(picked).map(Number));
     return POS_ORDER.map((pos) => {
-      const inPos = filtered
+      const rows = filtered
         .filter((p) => p.position === pos)
         .sort((a, b) => b.price - a.price || a.web_name.localeCompare(b.web_name));
-      const rows = inPos.slice(0, ROWS_PER_POS);
       const shown = new Set(rows.map((p) => p.id));
       const pinned = players.filter((p) => p.position === pos && pickedIds.has(p.id) && !shown.has(p.id));
       return { pos, rows: [...pinned, ...rows] };
@@ -235,9 +286,21 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
               {/* Pool */}
               <div className="min-h-0 flex-1 overflow-y-auto sm:max-h-[60vh] sm:border-r sm:border-line">
                 {groups.length === 0 && (
-                  <p className="px-4 py-10 text-center text-body text-ink-700">
-                    {players.length ? "No players match that search." : "Loading players…"}
-                  </p>
+                  <div className="px-4 py-10 text-center">
+                    <p className="m-0 text-body text-ink-700">
+                      {players.length ? "No players match that search." : "Loading players…"}
+                    </p>
+                    {/* The one genuinely-not-ours cause of "where is he?": FPL
+                        publishes transfer-window signings on their own schedule,
+                        sometimes days after the move. Say so here rather than
+                        letting it read as our bug — every OTHER reason a player
+                        could be missing was fixed on 2026-08-06. */}
+                    {players.length > 0 && (
+                      <p className="m-0 mt-2 text-label text-ink-700">
+                        Missing a new signing? FPL adds transfers with a delay.
+                      </p>
+                    )}
+                  </div>
                 )}
                 {groups.map(({ pos, rows }) => (
                   <div key={pos}>
@@ -253,6 +316,8 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                       const disabled =
                         !isPicked && (chosen.length >= SQUAD_SIZE || capReached || clubFull);
                       const isCaptain = captainId === p.id;
+                      // Flagged, not filtered: he is still pickable.
+                      const unavailable = UNAVAILABLE[p.status];
                       return (
                         <div
                           key={p.id}
@@ -286,6 +351,11 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                                 {isCaptain && (
                                   <span className="ml-1.5 text-[11px] font-semibold uppercase tracking-[.08em] text-state-blue">
                                     Captain
+                                  </span>
+                                )}
+                                {unavailable && (
+                                  <span className="ml-1.5 text-[11px] font-semibold uppercase tracking-[.08em] text-out-red">
+                                    {unavailable}
                                   </span>
                                 )}
                               </span>

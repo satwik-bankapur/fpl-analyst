@@ -136,8 +136,102 @@ def test_players_list_shape_and_cache(golden_sf, client_for):
     rows = r.json()
     assert len(rows) > 100
     p = rows[0]
-    assert set(p) == {"id", "web_name", "team_short", "position", "price"}
+    assert set(p) == {"id", "web_name", "full_name", "team_short",
+                      "position", "price", "status"}
     assert p["position"] in {"GK", "DEF", "MID", "FWD"}
+
+
+# --- the picker's universe (2026-08-06) -------------------------------------
+#
+# These three hold boundary B of scripts/player_coverage.py: the payload is the
+# draft picker's ENTIRE universe, so anything this route omits cannot be picked
+# at all. The walkthrough that prompted them reported "missing players"; the
+# backend turned out to be clean and the losses were all in the browser, but
+# nothing stopped a filter being added here later, which is what these are for.
+
+def test_players_list_ships_every_row_whatever_the_status(golden_sf, client_for):
+    """No WHERE clause. An injured or suspended player is a legal pick — people
+    draft them deliberately for the fixture after next — so availability is
+    shipped as data, never as an omission."""
+    from sqlalchemy import func, select as sa_select
+    from fpl.models import Player
+
+    with golden_sf() as s:
+        in_db = s.scalar(sa_select(func.count()).select_from(Player))
+
+    rows = client_for(golden_sf).get("/api/players").json()
+    assert len(rows) == in_db, "the payload dropped rows the table has"
+
+    # And the unavailable ones are actually present, not merely counted.
+    with golden_sf() as s:
+        flagged = set(s.scalars(
+            sa_select(Player.id).where(Player.status != "a")).all())
+    assert flagged, "fixture has no non-available players; this test proves nothing"
+    assert flagged <= {r["id"] for r in rows}
+
+
+def test_players_list_carries_what_the_search_needs(golden_sf, client_for):
+    """`web_name` alone is not searchable enough: FPL abbreviates it ("M.Salah"),
+    so the picker needs `full_name` to match a real first name."""
+    rows = client_for(golden_sf).get("/api/players").json()
+    named = [r for r in rows if r["full_name"]]
+    assert len(named) > 100
+    # At least one row where the full name carries a word web_name does not —
+    # the exact case that returned zero results before this shipped.
+    assert any(
+        set(r["full_name"].lower().split()) - set(r["web_name"].lower().split())
+        for r in named
+    )
+
+
+def test_players_list_has_no_limit(golden_sf, client_for):
+    """A cap here would look identical to the row cap that hid 332 of 572
+    players in the picker. Neither is allowed to come back quietly."""
+    rows = client_for(golden_sf).get("/api/players").json()
+    by_pos: dict[str, int] = {}
+    for r in rows:
+        by_pos[r["position"]] = by_pos.get(r["position"], 0) + 1
+    # The frozen 2025-26 snapshot has far more than 60 in every outfield slot;
+    # 60 was the old per-position cap, so exceeding it proves no cap survives.
+    assert min(by_pos[p] for p in ("DEF", "MID")) > 60, by_pos
+
+
+def test_coverage_diagnostic_still_mirrors_the_picker():
+    """`scripts/player_coverage.py` reimplements the picker's cap and search in
+    Python because it cannot import TypeScript. A silent drift between the two
+    turns the diagnostic into a confident liar, so pin the pair here.
+
+    This asserts on the SOURCE of DraftPicker.tsx, which is unusual and
+    deliberate: the alternative is a browser test runner the repo does not have,
+    for a two-constant contract.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    picker = (root / "web" / "components" / "DraftPicker.tsx").read_text(encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location(
+        "player_coverage", root / "scripts" / "player_coverage.py")
+    cov = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cov)
+
+    # 1. The row cap is gone from the picker, and the mirror agrees.
+    assert "ROWS_PER_POS" not in picker, (
+        "the per-position row cap is back in DraftPicker.tsx — it hid 332 of 572 "
+        "players. If that is intended, set ROWS_PER_POS in player_coverage.py to match.")
+    assert cov.ROWS_PER_POS == 0
+
+    # 2. Both folds agree on the names that were unfindable before.
+    for raw, typed in [("Aït-Nouri", "ait-nouri"), ("Gyökeres", "gyokeres"),
+                       ("Ødegaard", "odegaard"), ("Muñoz", "munoz"),
+                       ("Fábio Vieira", "fabio vieira"), ("Groß", "gross")]:
+        assert cov._picker_search(typed, {"web_name": raw, "full_name": "",
+                                          "team_short": "XXX"}), raw
+
+    # 3. The picker still searches all three fields the mirror does.
+    for field in ("web_name", "full_name", "team_short"):
+        assert field in picker, f"picker no longer references {field}"
 
 
 def test_preview_latest(golden_sf, client_for):

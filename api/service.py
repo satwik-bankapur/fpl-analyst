@@ -316,6 +316,19 @@ def mode_of(deps: Deps) -> str:
 
 
 def players_list(deps: Deps) -> list[dict]:
+    """Every player in the table, whatever their status.
+
+    NO WHERE CLAUSE AND NO LIMIT, deliberately (2026-08-06). This is the draft
+    picker's entire universe: a player filtered out here cannot be picked at all,
+    and an injured or suspended player is still a legal pick — people draft them
+    on purpose, for the fixture after next. So availability is shipped as data
+    and rendered as a visual flag, never as an omission. `scripts/player_coverage.py`
+    boundary B fails if a filter appears here.
+
+    `full_name` is shipped because the picker searches it: FPL's `web_name` is
+    often a surname or an initialled form ("M.Salah"), so without the full name
+    typing someone's actual first name matches nothing.
+    """
     with deps.session_factory() as session:
         teams = load_teams(session)
         rows = session.scalars(select(Player)).all()
@@ -323,9 +336,15 @@ def players_list(deps: Deps) -> list[dict]:
             {
                 "id": p.id,
                 "web_name": p.web_name,
+                "full_name": p.full_name,
                 "team_short": teams.get(p.team_id, {}).get("short_name", "?"),
                 "position": _POS.get(p.position, "?"),
                 "price": float(p.price),
+                # 'a' available / 'd' doubtful / 'i' injured / 's' suspended /
+                # 'u' unavailable / 'n' on loan. `news` is NOT shipped: it is
+                # free text FPL writes, it is the widest untrusted string on this
+                # payload, and the picker only needs the one-letter state.
+                "status": p.status,
             }
             for p in rows
         ]

@@ -8,12 +8,18 @@ export type Health = {
   next_deadline: string | null;
 };
 
+// Mirrors api/service.players_list. `full_name` feeds the picker's search
+// (web_name is often "M.Salah", so a first-name search needs this) and `status`
+// feeds its availability flag — every player is shipped whatever their status,
+// and an unavailable one is marked, never hidden.
 export type PlayerRow = {
   id: number;
   web_name: string;
+  full_name: string | null;
   team_short: string;
   position: "GK" | "DEF" | "MID" | "FWD";
   price: number;
+  status: string;
 };
 
 export type Preview = {
