@@ -87,6 +87,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [gate, setGate] = useState<string | null>(null);
 
   useEffect(() => {
     getPlayers().then(setPlayers).catch(() => setError("Couldn't load players."));
@@ -171,6 +172,7 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
     }
     setError(null);
     setFailed(null);
+    setGate(null);
     setBusy(true);
     try {
       const ordered = POS_ORDER.flatMap((pos) => chosen.filter((p) => p.position === pos).map((p) => p.id));
@@ -183,6 +185,15 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
       // rather than blaming the writer for a rejection that never got that far.
       if (e?.status === 400) {
         setError(e?.detail?.message || "That squad isn't legal.");
+        return;
+      }
+      // FREE_BRIEF_ACCESS said no (403 sign_in_required). Deliberately NOT the
+      // full-screen `failed` state: this is a detour, not a failure, and the
+      // squad they just spent a minute building stays exactly where it is. The
+      // sign-in link opens in a new tab for the same reason — coming back to a
+      // reset picker would be the dead end this is supposed to avoid.
+      if (e?.status === 403 && e?.detail?.error === "sign_in_required") {
+        setGate(e?.detail?.message || "Sign in to generate a brief.");
         return;
       }
       setFailed(
@@ -464,6 +475,26 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
                 </div>
               </div>
             </div>
+
+            {gate && (
+              <div
+                className="mx-4 mb-1 mt-2 rounded border border-line-strong bg-surface-800 p-3.5 sm:mx-6"
+                role="status"
+              >
+                <p className="m-0 text-body font-medium text-ink-0">{gate}</p>
+                <p className="m-0 mt-1 text-label leading-relaxed text-ink-600">
+                  Your squad stays here. Sign in, come back to this tab, and hit Rate again.
+                </p>
+                <a
+                  href="/login?next=/"
+                  target="_blank"
+                  rel="noopener"
+                  className="mt-2.5 inline-block text-label font-medium text-ink-0 underline"
+                >
+                  Sign in
+                </a>
+              </div>
+            )}
 
             {error && (
               <p className="px-4 pb-1 pt-2 text-body text-out-red sm:px-6" role="alert">

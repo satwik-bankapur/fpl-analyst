@@ -67,6 +67,26 @@ class ApiSettings(BaseSettings):
     # it; Railway sets RUN_SCHEDULER=true (single replica — see railway.toml).
     run_scheduler: bool = False                         # RUN_SCHEDULER
 
+    # --- Who may generate a free brief (2026-08-06) ------------------------
+    # THE CONVERSION KNOB. Three modes, enforced server-side in POST /api/brief:
+    #
+    #   open         no sign-in, ever. The design the accounts build was given,
+    #                and the DEFAULT — everything else here is opt-in.
+    #   second_gate  the first brief per browser is anonymous; a second one asks
+    #                for a sign-in. A soft prompt, never a dead end: the squad
+    #                stays on screen and the 403 carries `sign_in_required`.
+    #   login_first  every brief needs a session.
+    #
+    # The tradeoff is recorded in docs/layer5 §8 (2026-08-06). Read it before
+    # moving off `open`: the free brief with no login is the top of the entire
+    # funnel, and the gate trades reach for addresses.
+    #
+    # An unrecognised value REFUSES TO BOOT (api/main._check_access_config).
+    # Neither default is safe to guess: falling back to `open` silently ignores a
+    # deliberate gate, and falling back to `login_first` silently walls the free
+    # product. A typo here should be a deploy-log line, not a discovery.
+    free_brief_access: str = "open"                     # FREE_BRIEF_ACCESS
+
     # Rate limit: brief GENERATIONS per IP per hour (cache hits are exempt, §1.1).
     brief_rate_limit: int = 5
     brief_rate_window_s: int = 3600

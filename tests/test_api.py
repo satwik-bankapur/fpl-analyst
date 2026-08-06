@@ -255,6 +255,185 @@ def test_post_draft_brief(golden_sf, client_for):
     assert body["locked_sections"] == []       # Stage A: no paywall
 
 
+# ===========================================================================
+# FREE_BRIEF_ACCESS — the login gate (2026-08-06)
+#
+# Three modes, all enforced in ONE place (`routes._enforce_brief_access`) and
+# all server-side: the decision reads cookies this API set, never anything the
+# page claims. `open` is the default and is the behaviour every other test in
+# this file already assumes.
+# ===========================================================================
+
+@pytest.fixture(autouse=True)
+def _access_mode_default(monkeypatch):
+    """Pin the default for every test in this file.
+
+    ApiSettings reads a .env, so without this a developer with FREE_BRIEF_ACCESS
+    set locally would see unrelated tests fail with a 403 they cannot explain.
+
+    `session_cookie_secure=False` for the same reason tests/test_accounts.py
+    does it: TestClient talks http://testserver, and a Secure cookie is
+    correctly refused over plain http — so with the production default every
+    cookie assertion here would fail while the code was working.
+    """
+    monkeypatch.setattr(settings, "free_brief_access", "open")
+    monkeypatch.setattr(settings, "session_cookie_secure", False)
+
+
+def _sign_in(client, SF, email="gated@example.com"):
+    """Give the client a real session cookie, the way a magic link would."""
+    from api import accounts
+
+    with SF() as s, s.begin():
+        account, _ = accounts.find_or_create_account(
+            s, email, provider="magic_link", accept_terms_now=True)
+        token = accounts.create_session(s, account.id)
+    client.cookies.set(accounts.SESSION_COOKIE, token)
+    return token
+
+
+def test_open_mode_never_asks_for_a_login(golden_sf, client_for, monkeypatch):
+    """The default. Two anonymous briefs in a row, both fine.
+
+    This is the accounts constraint restated as a test: with FREE_BRIEF_ACCESS
+    unset, nothing about the free funnel changed.
+    """
+    monkeypatch.setattr(settings, "free_brief_access", "open")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+    for _ in range(2):
+        r = client.post("/api/brief", json=_draft_body(ids, cap))
+        assert r.status_code == 200, r.text
+
+
+def test_second_gate_gives_one_brief_then_asks(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "free_brief_access", "second_gate")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    first = client.post("/api/brief", json=_draft_body(ids, cap))
+    assert first.status_code == 200, "the first brief must stay anonymous"
+    assert client.cookies.get("fpl_free_brief"), "the free brief was not marked as spent"
+
+    second = client.post("/api/brief", json=_draft_body(ids, cap))
+    assert second.status_code == 403
+    assert second.json()["detail"]["error"] == "sign_in_required"
+    # A prompt, not a wall: 401 would make browsers and proxies treat this as a
+    # credential failure, and the frontend renders 403 beside the squad.
+    assert second.status_code != 401
+
+
+def test_second_gate_lets_a_signed_in_user_carry_on(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "free_brief_access", "second_gate")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    assert client.post("/api/brief", json=_draft_body(ids, cap)).status_code == 200
+    assert client.post("/api/brief", json=_draft_body(ids, cap)).status_code == 403
+
+    _sign_in(client, golden_sf)
+    after = client.post("/api/brief", json=_draft_body(ids, cap))
+    assert after.status_code == 200, "signing in must clear the gate"
+
+
+def test_login_first_gates_the_very_first_brief(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "free_brief_access", "login_first")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    anon = client.post("/api/brief", json=_draft_body(ids, cap))
+    assert anon.status_code == 403
+    assert anon.json()["detail"]["error"] == "sign_in_required"
+
+    _sign_in(client, golden_sf)
+    assert client.post("/api/brief", json=_draft_body(ids, cap)).status_code == 200
+
+
+def test_a_gated_request_writes_nothing(golden_sf, client_for, monkeypatch):
+    """The gate runs before any row is written.
+
+    A refused caller must not leave a draft_squads row or an email signup behind
+    for a brief they never received — that is a junk row and, for the email, a
+    subscriber who never got what they gave the address for.
+    """
+    monkeypatch.setattr(settings, "free_brief_access", "login_first")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    with golden_sf() as s:
+        before = s.scalar(select(func.count()).select_from(DraftSquad))
+
+    body = _draft_body(ids, cap) | {"email": "never@example.com"}
+    assert client.post("/api/brief", json=body).status_code == 403
+
+    with golden_sf() as s:
+        assert s.scalar(select(func.count()).select_from(DraftSquad)) == before
+        assert s.get(EmailSignup, "never@example.com") is None
+
+
+def test_an_illegal_squad_does_not_burn_the_free_brief(golden_sf, client_for, monkeypatch):
+    """A 400 must not spend the one anonymous brief.
+
+    `_mark_free_brief_used` is called after generation for exactly this reason:
+    a first-time visitor who mistypes a squad should not be asked to sign in as
+    a result of our validation.
+    """
+    monkeypatch.setattr(settings, "free_brief_access", "second_gate")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    bad = client.post("/api/brief", json=_draft_body(ids[:5], cap))
+    assert bad.status_code == 400
+    assert not client.cookies.get("fpl_free_brief")
+
+    assert client.post("/api/brief", json=_draft_body(ids, cap)).status_code == 200
+
+
+def test_reading_a_brief_is_never_gated(golden_sf, client_for, monkeypatch):
+    """FREE_BRIEF_ACCESS gates GENERATION only.
+
+    Reads stay open in every mode: the emailed full-view link is a PAID delivery
+    mechanism, and gating the read would break it for the customers who are
+    paying. The paywall still decides what a reader sees; this decides who may
+    make a brief exist.
+    """
+    monkeypatch.setattr(settings, "free_brief_access", "login_first")
+    client = client_for(golden_sf)
+    ids, cap = _sample_squad()
+
+    _sign_in(client, golden_sf)
+    did = client.post("/api/brief", json=_draft_body(ids, cap)).json()["draft_id"]
+
+    client.cookies.clear()
+    anon = client.get(f"/api/brief/draft/{did}")
+    assert anon.status_code == 200, "an anonymous reader still gets an existing brief"
+    assert anon.json()["sections"]
+
+
+def test_health_publishes_the_mode(golden_sf, client_for, monkeypatch):
+    monkeypatch.setattr(settings, "free_brief_access", "second_gate")
+    body = client_for(golden_sf).get("/api/health").json()
+    assert body["free_brief_access"] == "second_gate"
+
+
+def test_an_unknown_mode_refuses_to_boot(monkeypatch):
+    """No safe default exists, so a typo must not be guessed at.
+
+    Falling back to `open` silently ignores a gate someone configured; falling
+    back to `login_first` silently walls the free product. Both are invisible
+    until the conversion numbers move.
+    """
+    from api.main import _check_access_config
+
+    monkeypatch.setattr(settings, "free_brief_access", "second-gate")  # hyphen typo
+    with pytest.raises(RuntimeError, match="FREE_BRIEF_ACCESS"):
+        _check_access_config()
+
+    for good in ("open", "second_gate", "login_first"):
+        monkeypatch.setattr(settings, "free_brief_access", good)
+        _check_access_config()
+
+
 def test_draft_brief_roundtrip_and_404(golden_sf, client_for):
     client = client_for(golden_sf)
     ids, cap = _sample_squad()

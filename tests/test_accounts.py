@@ -71,6 +71,11 @@ def auth_settings(monkeypatch):
     monkeypatch.setattr(settings, "google_client_id", GOOGLE_CLIENT)
     monkeypatch.setattr(settings, "google_client_secret", "google-secret")
     monkeypatch.setattr(settings, "terms_version", "2026-08-04")
+    # §1's whole subject is that the free funnel takes no login. FREE_BRIEF_ACCESS
+    # (2026-08-06) can change that deliberately, and it is read from a .env — so
+    # pin the default here, or a developer with the gate switched on locally would
+    # see this file fail and read it as the constraint being broken.
+    monkeypatch.setattr(settings, "free_brief_access", "open")
     # The TestClient speaks http, and a Secure cookie would be dropped before any
     # assertion could see it. Production defaults to True; api/main asserts nothing
     # about it, so this is a transport concession, not a relaxed rule.

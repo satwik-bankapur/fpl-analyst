@@ -18,7 +18,12 @@ export default async function Home() {
       <SiteHeader />
 
       <main className="mx-auto w-full max-w-[1180px] flex-1">
-        <HomeHero mode={mode} nextGw={health?.next_gw} deadline={health?.next_deadline} />
+        <HomeHero
+          mode={mode}
+          nextGw={health?.next_gw}
+          deadline={health?.next_deadline}
+          access={health?.free_brief_access ?? "open"}
+        />
 
         {/* Cards below the fold: the preview, then pricing + email capture. */}
         <div className="grid gap-3.5 px-3 pb-10 sm:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] sm:items-stretch sm:px-12">

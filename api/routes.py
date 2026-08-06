@@ -209,6 +209,23 @@ def _enforce_generation_budget(request: Request, deps: Deps) -> None:
 # funnel; a login in front of it is not a hardening, it is the product's front
 # door welded shut. Paid sections are gated by `gate_sections` and nothing else,
 # exactly as before; a session only changes which side of that allow-list you land on.
+#
+# AMENDED 2026-08-06. The rule above still holds by default and is still the
+# design — but it is now a CONFIGURED default rather than a property of the code.
+# `FREE_BRIEF_ACCESS` (api/config.py) can gate brief GENERATION, and it ships as
+# `open`, which is exactly the behaviour described above. Three things did not
+# change and are not negotiable:
+#
+#   1. There is still no `_require_account` and no route-level auth dependency.
+#      The gate is ONE function, `_enforce_brief_access`, called from ONE place.
+#   2. It gates POST /api/brief only — GENERATION. Reading a brief that already
+#      exists (GET /api/brief/{team}/{gw}, GET /api/brief/draft/*) stays open to
+#      anonymous readers and still answers 200 with paid sections locked. Gating
+#      the read would break the emailed full-view link, which is a paid delivery
+#      mechanism, not a funnel step.
+#   3. It never answers 401. A gated request is 403 `sign_in_required`, which the
+#      frontend renders as a prompt beside the squad the user just built — a
+#      detour, not a dead end.
 
 def _set_session_cookie(response: Response, token: str) -> None:
     """Attach a session cookie. httpOnly + Secure + SameSite, all three.
@@ -305,6 +322,73 @@ def _paid_account_id(account: dict | None) -> int | None:
     return account["id"]
 
 
+# --- the free-brief gate (2026-08-06) --------------------------------------
+
+# Marks a browser that has spent its one anonymous brief. Not a credential and
+# not signed: the only thing it can assert is "this browser has had its free
+# one", which is a claim AGAINST the holder — forging it gains nothing, so a
+# signature would protect nobody.
+#
+# ponytail: clearing cookies resets the gate, and that is inherent — an
+# anonymous visitor has no other identity to key on. The alternatives are worse:
+# IP keying punishes shared networks (one office, one brief), and fingerprinting
+# is a privacy liability the privacy page would have to confess to. If this ever
+# needs to be airtight, the answer is `login_first`, not a cleverer cookie.
+FREE_BRIEF_COOKIE = "fpl_free_brief"
+
+
+def _enforce_brief_access(request: Request, deps: Deps) -> None:
+    """Raise 403 `sign_in_required` if this caller may not GENERATE a brief.
+
+    THE ONLY ENFORCEMENT POINT for FREE_BRIEF_ACCESS. Server-side by
+    construction: the decision reads a session cookie and an httpOnly marker
+    cookie, both set by this API, and never anything the page can tell us.
+
+    Signed in ⇒ always allowed, in every mode. Note this asks only whether a
+    session EXISTS, not whether terms are accepted or anything is paid: this
+    gate is about who may generate, and `_paid_account_id` still decides what
+    they see. Wiring the terms gate in here would turn a checkbox into a
+    generation failure.
+    """
+    mode = service.access_mode()
+    if mode == "open":
+        return
+    if _current_account(request, deps) is not None:
+        return
+    if mode == "second_gate" and not request.cookies.get(FREE_BRIEF_COOKIE):
+        return  # their first one, on the house
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "sign_in_required",
+            "message": ("Sign in to generate a brief."
+                        if mode == "login_first" else
+                        "Sign in for another brief — the first one is free."),
+        },
+    )
+
+
+def _mark_free_brief_used(response: Response) -> None:
+    """Spend this browser's anonymous brief. Called ONLY after one is generated.
+
+    Marking before generation would burn the free brief on a 400 for an illegal
+    squad, which is a bad first impression paid for by a user who did nothing
+    wrong. In `open` mode nothing reads this cookie, but it is still set — so
+    turning `second_gate` on does not immediately re-gate everyone who already
+    had their free brief under `open`.
+    """
+    response.set_cookie(
+        FREE_BRIEF_COOKIE,
+        "1",
+        max_age=365 * 86400,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite=settings.session_cookie_samesite,
+        domain=settings.session_cookie_domain or None,
+        path="/",
+    )
+
+
 def _login(deps: Deps, response: Response, request: Request, account_id: int) -> None:
     """Establish a session, rotating away from whatever arrived.
 
@@ -327,11 +411,15 @@ def _login(deps: Deps, response: Response, request: Request, account_id: int) ->
 # --- 1.1 / draft brief -----------------------------------------------------
 
 @router.post("/brief")
-def post_brief(body: BriefRequest, request: Request, deps: Deps = Depends(get_deps)):
+def post_brief(body: BriefRequest, request: Request, response: Response,
+               deps: Deps = Depends(get_deps)):
     # Budget check first: `limiter` below only counts GENERATIONS, and the draft
     # row is written before the cache is consulted — so without this, replaying one
     # valid squad body grows `draft_squads` without bound and never trips a limit.
     _enforce_request_budget(request)
+    # Then the access gate — before any row is written, so a gated caller leaves
+    # no draft_squads row and no email signup behind for a brief they never got.
+    _enforce_brief_access(request, deps)
     if body.draft is not None:
         # Validate BEFORE persisting: an illegal squad must not leave a draft row
         # (or an email signup) behind for a brief that will never be generated.
@@ -345,9 +433,11 @@ def post_brief(body: BriefRequest, request: Request, deps: Deps = Depends(get_de
             body.email)
         if body.email:  # draft-modal email also joins the free list
             _safe_signup(deps, body.email, None, "draft")
-        return service.brief_from_draft(
+        brief = service.brief_from_draft(
             deps, did,
             before_generate=lambda: _enforce_generation_budget(request, deps))
+        _mark_free_brief_used(response)
+        return brief
 
     if body.team_id is not None:
         if service.mode_of(deps) != "IN_SEASON":

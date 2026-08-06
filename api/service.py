@@ -67,6 +67,22 @@ def paywall_on() -> bool:
     return settings.paywall_enabled
 
 
+# --- Who may generate a free brief (2026-08-06) ----------------------------
+#
+# Same shape as paywall_on() above and for the same reason: read through a
+# function, never bind a module constant to an env flag.
+#
+# This is the ONLY definition of the mode vocabulary. The gate itself is
+# `_enforce_brief_access` in api/routes.py and lives nowhere else — the paywall
+# taught this lesson already (three copies of the section vocabulary that
+# disagreed), so there is one list and one enforcement point.
+FREE_BRIEF_ACCESS_MODES = frozenset({"open", "second_gate", "login_first"})
+
+
+def access_mode() -> str:
+    return settings.free_brief_access
+
+
 # --- FastAPI dependency ----------------------------------------------------
 
 def get_deps() -> Deps:
@@ -419,6 +435,12 @@ def health(deps: Deps) -> dict:
         "mode": mode,
         "next_gw": ng.id if ng else None,
         "next_deadline": iso_utc(ng.deadline) if ng else None,
+        # The access mode, so the landing page can say up front that a brief
+        # needs a sign-in rather than letting someone pick fifteen players and
+        # only then hit a 403. NOT the enforcement — `_enforce_brief_access`
+        # decides, server-side, and a client that ignores this still gets gated.
+        # Safe to publish: it describes the site's own policy, not the caller.
+        "free_brief_access": access_mode(),
     }
 
 

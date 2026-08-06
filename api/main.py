@@ -19,7 +19,7 @@ from . import tokens
 from .config import settings
 from .ratelimit import RateLimited
 from .routes import router
-from .service import BriefError
+from .service import FREE_BRIEF_ACCESS_MODES, BriefError
 
 log = logging.getLogger("api")
 
@@ -60,8 +60,24 @@ def _check_stage_b_config() -> None:
             "run, claim send_log rows, and deliver nothing.")
 
 
+def _check_access_config() -> None:
+    """Refuse to boot on an unrecognised FREE_BRIEF_ACCESS.
+
+    There is no safe default to fall back to. Guessing `open` silently ignores a
+    gate someone deliberately configured; guessing `login_first` silently walls
+    the free product, which is the top of the whole funnel. Both failures are
+    invisible until someone notices the conversion numbers moved. A typo belongs
+    in a deploy log.
+    """
+    if settings.free_brief_access not in FREE_BRIEF_ACCESS_MODES:
+        raise RuntimeError(
+            f"FREE_BRIEF_ACCESS={settings.free_brief_access!r} is not one of "
+            f"{sorted(FREE_BRIEF_ACCESS_MODES)}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_access_config()
     _check_stage_b_config()
     scheduler = None
     if settings.run_scheduler:

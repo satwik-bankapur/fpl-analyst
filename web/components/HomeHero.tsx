@@ -15,14 +15,26 @@ export default function HomeHero({
   mode,
   nextGw,
   deadline,
+  access = "open",
 }: {
   mode: "PRESEASON" | "IN_SEASON";
   nextGw?: number | null;
   deadline?: string | null;
+  access?: "open" | "second_gate" | "login_first";
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [teamId, setTeamId] = useState("");
+
+  // "no signup" is a promise, so it only appears when it is true. Under
+  // login_first the requirement is stated BEFORE the picker opens — finding out
+  // after building fifteen players is the dead end this mode is accused of.
+  const freeLine =
+    access === "login_first"
+      ? "Free · sign in to generate · 15 players, £100.0m"
+      : access === "second_gate"
+        ? "Free · first one needs no signup · 15 players, £100.0m"
+        : "Free · no signup · 15 players, £100.0m";
 
   const when = deadline
     ? new Date(deadline).toLocaleString("en-GB", {
@@ -55,7 +67,7 @@ export default function HomeHero({
           <button onClick={() => setOpen(true)} className="btn-primary w-full py-3.5 sm:w-auto sm:px-8">
             Rate my draft
           </button>
-          <p className="m-0 mt-3 text-label text-ink-700">Free · no signup · 15 players, £100.0m</p>
+          <p className="m-0 mt-3 text-label text-ink-700">{freeLine}</p>
         </>
       ) : (
         <>

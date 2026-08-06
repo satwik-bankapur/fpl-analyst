@@ -6,6 +6,10 @@ export type Health = {
   mode: "PRESEASON" | "IN_SEASON";
   next_gw: number | null;
   next_deadline: string | null;
+  // Mirrors FREE_BRIEF_ACCESS (api/config.py). Advisory only — it lets the UI
+  // warn before someone builds a squad they cannot submit. The server enforces
+  // it regardless, and a 403 `sign_in_required` is the real answer.
+  free_brief_access?: "open" | "second_gate" | "login_first";
 };
 
 // Mirrors api/service.players_list. `full_name` feeds the picker's search
@@ -69,10 +73,17 @@ export function getPlayers(): Promise<PlayerRow[]> {
   return fetch(`${API}/api/players`, { cache: "no-store" }).then(json<PlayerRow[]>);
 }
 
+// `credentials: "include"` (2026-08-06) is load-bearing for FREE_BRIEF_ACCESS.
+// The gate reads the session cookie and the httpOnly `fpl_free_brief` marker,
+// and the API is a different origin from the app — so without this the cookies
+// never arrive AND the Set-Cookie that spends the free brief is never stored.
+// `second_gate` would hand out unlimited free briefs and `login_first` would
+// refuse a signed-in user. It stays harmless under the default `open`.
 export function postDraftBrief(draft: DraftSubmit): Promise<Brief> {
   return fetch(`${API}/api/brief`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ draft: { player_ids: draft.player_ids, captain_id: draft.captain_id }, email: draft.email || null }),
   }).then(json<Brief>);
 }
