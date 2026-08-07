@@ -1081,3 +1081,129 @@ Nothing in the merge fixed any of these. They were open before and they are open
 - **`next@14.2.35`** — still behind.
 - **Everything ships off:** `PAYWALL_ENABLED=false`, `SEND_ENABLED=false`,
   `RUN_SCHEDULER=false`, no Paddle credentials, no Google credentials, no Resend key.
+
+
+---
+
+## 11. Pre-launch fix batch — 2026-08-07 (branch `prelaunch-fixes`)
+
+Six items from a localhost walkthrough. **Not merged** — the branch is pushed for a
+re-walk of the whole flow before it lands on `main`.
+
+### What this changes about claims made earlier in this document
+
+- **§10.5's "the three legal pages are two-thirds placeholder" is out of date.** `/terms`
+  and `/refunds` are now full drafts. They are **DRAFT, unreviewed by a lawyer**, and
+  `docs/LAUNCH-CHECKLIST.md` carries a callout naming exactly what the owner must decide
+  before launch. That row moves from "not written" to "written, not signed off" — which is
+  progress, not completion.
+- **§10.5's "double opt-in for signups (AUDIT §D5) is not built" is now false.** It is
+  built and tested. See 11.3.
+- Everything else in §10.5 stands unchanged: the LLM writer is still wired to nothing,
+  nothing schedules the send batch, `next@14.2.35` is still behind, and everything paid
+  still ships switched off.
+- **§10.4's per-provider list is unchanged.** Nothing in this batch spoke to Paddle,
+  Google or Resend. The one external system touched is the FPL API, by the new
+  diagnostic in 11.1 — read-only, and the same public endpoint `sync` already uses.
+
+### 11.1 Missing players — diagnosed across three layers, and it was not the backend
+
+`scripts/player_coverage.py` (new) compares live `bootstrap-static` elements ↔ the
+`players` table ↔ the `/api/players` payload, and prints who is dropped at each boundary.
+
+**Run against the live API on 2026-08-06: 572 → 572 → 572. The backend drops nobody.**
+`parse_player` has no status filter and no per-row skip — a malformed row aborts the whole
+sync rather than being quietly dropped — and `players_list` has no `WHERE` and no `LIMIT`.
+Both losses were in the browser:
+
+- `DraftPicker.tsx` rendered **60 rows per position**, price-desc, hiding **332 of 572
+  players (58%)**, all at the cheap end. Every budget enabler was unreachable. The cap is
+  deleted rather than raised.
+- The search matched `web_name` + `team_short` through `toLowerCase()` alone, so the **42
+  non-ASCII names** needed the exact glyph — "gyokeres", "odegaard", "munoz" and "gross"
+  all returned nothing — and `full_name` was not on the payload at all, so a real first
+  name ("mohamed" for `M.Salah`) matched nothing either. Both now fold through `fold()`,
+  which NFD-strips combining marks and maps the letters NFD cannot decompose (Ø, ß, ł, đ,
+  ı, æ). `Groß` is the one that proves the second half is needed: `ß` does not decompose.
+
+`/api/players` now ships `full_name` and `status`, and still ships **every** player
+whatever their status — an injured player is a legal draft pick, so availability is a flag
+on the row, never an omission. The one cause that is genuinely not ours (FPL publishing
+window signings days late) is named in the picker's empty-results state.
+
+The diagnostic reimplements the picker's search in Python because it cannot import
+TypeScript; `tests/test_api.py::test_coverage_diagnostic_still_mirrors_the_picker` fails if
+the two drift.
+
+### 11.2 `FREE_BRIEF_ACCESS` — the login gate is now a config decision
+
+Three modes — `open` (default), `second_gate`, `login_first` — enforced server-side in one
+function, `routes._enforce_brief_access`. **The accounts constraint is unchanged as
+behaviour**: `open` is the default and every existing free-funnel test passes untouched.
+It is now a configured default rather than a property of the code.
+
+Gates **generation only**; reads stay anonymous in every mode so the emailed full-view link
+keeps working. The refusal is 403 `sign_in_required`, never 401, rendered beside the squad
+with the picks intact. An unrecognised mode refuses to boot. The conversion tradeoff is
+written out in `docs/layer5` §8 so it is not re-argued from scratch.
+
+### 11.3 Double opt-in — built (closes AUDIT §D5)
+
+A signup lands as `tier='pending'` with `confirmed_at` NULL and gets a confirm link;
+`api.send` will not mail it until someone clicks. The welcome email **moved from signup to
+confirmation**. Unconfirmed rows expire after 7 days and are deleted by the existing
+`/api/admin/sync` sweep. Migration `f6a7b8c9d0e1`, additive.
+
+Also closed a pre-existing hole the new filter would have inherited: `send.retry_failed`
+re-sent from `send_log` without re-reading consent, so an unsubscribe made in the hour
+between batch and retry was silently overridden. The guard now sits in `_rebuild`, where
+both templates funnel through it.
+
+**One thing to look at again:** the migration backfills existing rows as confirmed. That is
+grandfathering, and it is safe only because `email_signups` is empty everywhere this runs
+today. The reasoning is written into the migration so the decision gets made again on
+purpose if this is ever restored from a backup with a real list.
+
+### 11.4 Stub writer readability — `STUB_MODEL` is now `stub-template-v3`
+
+The verdict repeated one sentence shape per problem. Problems of a kind now fold into one
+sentence; the fixture outlook and watchlist are prose; doubles and blanks naming the same
+clubs collapse by team set. `unavailable` and `injury_doubt` are deliberately **not**
+grouped — their evidence carries `players.news`, which differs per player.
+
+Worth recording: the first draft of the grouped bench sentence asserted "each projected
+under two points", and the regenerated demo brief printed it above a 3.0. The engine's
+cutoff is not two points and was never ours to restate. It now asserts only what
+`dead_bench_spot` itself asserts and shows each player's number.
+
+The `STUB_MODEL` bump is load-bearing — `graph.cache` mixes it into `input_hash`.
+
+### 11.5 Terms and refunds — DRAFT
+
+Full prose in the same register as `/privacy`. `TERMS_VERSION` moved `2026-08-04` →
+`2026-08-07` across `api/config.py`, `/terms` and `/privacy` together: an account holding
+`2026-08-04` accepted a page reading "TODO — write the terms", and carrying that forward
+would be a consent record for words nobody saw. `/privacy`'s own text did not change.
+`/refunds` carries a display-only version, deliberately not `TERMS_VERSION`.
+
+**Nobody with a practising certificate has read either page.**
+
+### 11.6 UX polish
+
+Landing teaser lists top projected **outfield** players plus a line on the week's shape —
+it was five goalkeepers on near-identical projections, which is also the visible symptom of
+an empty `players_archive`. Login page states that Google sign-in exists but is off in this
+build instead of rendering nothing. Magic-link request now echoes the address, suggests
+spam, and offers a resend on a 30s cooldown plus a "different address" escape hatch. The
+brief header drops the section count when anything is locked (it counted visible + locked
+while reading time counted only visible). The picker gained a collapsible "your squad so
+far" on mobile, where the squad rail is hidden.
+
+### Verification
+
+- **499 tests pass** (was 467 at the start of the batch), offline as always.
+- `npm --prefix web run build` clean.
+- `scripts/player_coverage.py` run against the live FPL API; `scratch_brief.py` used to
+  eyeball the regenerated demo brief.
+- Migration `f6a7b8c9d0e1` applied to a fresh database and the resulting schema inspected.
+- **Still nothing deployed, and still no contact with Paddle, Google or Resend.**

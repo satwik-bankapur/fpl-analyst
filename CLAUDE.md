@@ -22,16 +22,30 @@ the entitlement rewire) were merged on 2026-08-04 and `main` is the only local b
 `SEND_ENABLED=false`, `RUN_SCHEDULER=false`, no Paddle credentials, no Google
 credentials, no Resend key, nothing deployed.
 
-**Nothing here has ever spoken to Paddle, Google, or Resend.** The 467-test suite is
+**Nothing here has ever spoken to Paddle, Google, or Resend.** The 499-test suite is
 offline by design and proves our side of each boundary only. `docs/STATUS.md` §10.4 is
 the explicit per-provider list; `docs/GO-LIVE.md` is the ordered runbook that closes it.
+
+**Unmerged work: branch `prelaunch-fixes` (2026-08-07).** Six fixes from a localhost
+walkthrough — the draft picker's missing players, a `FREE_BRIEF_ACCESS` config gate,
+double opt-in, a stub-writer readability pass, real terms/refunds drafts, and UX polish.
+`docs/STATUS.md` §11 is the full account. It is pushed and NOT merged, pending a re-walk.
+The rest of this section describes `main`.
 
 ### The accounts constraint (2026-08-04) — do not break this
 
 **The FREE brief takes no login.** `POST /api/brief`, the draft picker,
 `/api/preview/*`, `/api/players` and `/api/signup` are anonymous, and an anonymous
 reader of `GET /api/brief/{team}/{gw}` gets a **200 with paid sections locked** — never
-a 401 and never a redirect to `/login`. `api/accounts.py`'s only session dependency is
+a 401 and never a redirect to `/login`.
+
+> **Amended on branch `prelaunch-fixes` (2026-08-07), not yet on `main`.** The constraint
+> above is still the shipped behaviour and still the default, but it became a *configured*
+> default: `FREE_BRIEF_ACCESS` can gate brief GENERATION (`open` | `second_gate` |
+> `login_first`, defaulting to `open`). Enforcement is one function called from one place,
+> there is still no `_require_account`, reads stay anonymous in every mode, and a gated
+> request answers 403 `sign_in_required` rather than 401. `tests/test_accounts.py` §1
+> passes untouched. See `docs/layer5` §8 for the conversion tradeoff. `api/accounts.py`'s only session dependency is
 `routes._current_account`, which is OPTIONAL everywhere; there is deliberately no
 `_require_account`. `tests/test_accounts.py` §1 fails if a login appears in the free
 funnel. Entitlement now resolves **session → account → subscription**, but
@@ -47,9 +61,11 @@ the whole rule, and an unknown Paddle status still degrades to free.
   `api/accounts.py`, the `/api/auth/*` surface, `POST /api/account/delete` and the
   read-only `GET /api/admin/accounts`.
 - `web/` — Layer 5: Next.js frontend, 17 routes (11 public, re-skinned to the Scout
-  Report design; 6 under `/admin`, token-gated and `noindex`). `/terms` and `/refunds`
-  are **placeholder prose** — routing and footer links exist so Paddle's live review has
-  something to load; the text is still TODO (`docs/LAUNCH-CHECKLIST.md`).
+  Report design; 6 under `/admin`, token-gated and `noindex`). On `main`, `/terms` and
+  `/refunds` are **placeholder prose** — routing and footer links exist so Paddle's live
+  review has something to load; the text is still TODO (`docs/LAUNCH-CHECKLIST.md`).
+  Branch `prelaunch-fixes` replaces both with full drafts that **no lawyer has read**;
+  the checklist names what the owner must decide before launch.
 
 ### Current serving reality (read before you promise anything)
 
