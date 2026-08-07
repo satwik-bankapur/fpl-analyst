@@ -12,9 +12,14 @@ import { SiteHeader, SiteFooter } from "@/components/Chrome";
 // The version string below is `settings.terms_version` (api/config.py). BUMP BOTH
 // TOGETHER — the server prompts every account to re-accept when the config value
 // changes, and a bump with no change here asks people to re-agree to the same words.
+//
+// 2026-08-07: moved to match the terms bump. THIS PAGE'S WORDS DID NOT CHANGE —
+// the one shared version string covers both documents, so /terms going from a
+// TODO placeholder to real terms moves this number too. Worth knowing before
+// hunting for what changed here: nothing did.
 export const metadata = { title: "Privacy — The Scout Report" };
 
-const VERSION = "2026-08-04";
+const VERSION = "2026-08-07";
 
 export default function PrivacyPage() {
   return (

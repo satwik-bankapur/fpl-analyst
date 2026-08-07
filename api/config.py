@@ -131,7 +131,19 @@ class ApiSettings(BaseSettings):
     # account whose stored version differs is prompted to re-accept before paid
     # content is served (`accounts.needs_terms_acceptance`). A date-like string
     # rather than a number so the value is self-documenting in the DB.
-    terms_version: str = "2026-08-04"                   # TERMS_VERSION
+    #
+    # Must stay equal to the VERSION const on web/app/terms/page.tsx AND on
+    # web/app/privacy/page.tsx — all three move together or the site shows a
+    # version nobody was asked to accept.
+    #
+    # 2026-08-04 -> 2026-08-07: /terms stopped being a TODO placeholder and
+    # became real terms. The bump is the point, not a side effect — an account
+    # holding "2026-08-04" accepted a page that said "TODO, write the terms", and
+    # carrying that forward as agreement to the real text would be a consent
+    # record for words nobody ever saw. /refunds carries its own display-only
+    # version and is deliberately NOT this value: it is not part of the
+    # acceptance gate, so editing it must not re-prompt every account.
+    terms_version: str = "2026-08-07"                   # TERMS_VERSION
 
     # Session lifetime. 30 days: long enough that a weekly product does not ask
     # for a link every visit, short enough that an abandoned laptop expires.
