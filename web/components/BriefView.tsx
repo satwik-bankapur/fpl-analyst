@@ -70,10 +70,20 @@ export default function BriefView({
         </div>
         <div className="mt-3.5 flex flex-wrap gap-x-3.5 gap-y-1 border-t border-line pt-3.5 text-label text-ink-700">
           <span>Reading time {minutes} min</span>
-          <span aria-hidden>·</span>
-          <span>
-            {keys.length} section{keys.length === 1 ? "" : "s"}
-          </span>
+          {/* The section count is DROPPED when anything is locked (2026-08-06).
+              `keys` counts visible + locked while `minutes` counts only visible
+              words, so a paywalled reader saw "Reading time 1 min · 6 sections"
+              above three readable ones — the two numbers describing different
+              briefs, side by side. The lock cards already say what is behind the
+              paywall and how many, which is the honest place for that number. */}
+          {brief.locked_sections.length === 0 && (
+            <>
+              <span aria-hidden>·</span>
+              <span>
+                {keys.length} section{keys.length === 1 ? "" : "s"}
+              </span>
+            </>
+          )}
           {/* `brief.cached` is deliberately NOT shown (2026-07-30). Whether the
               brief came from the cache is our operational detail, not the
               reader's business — it told them nothing and read like debug output.

@@ -51,6 +51,22 @@ def _gather(deps, gameweek=None):
         return ep_map.get(pid, {}).get("ep_next4", 0.0)
 
     top_ep = sorted(scored, key=lambda t: t[1]["ep_next4"], reverse=True)[:PREVIEW_TOP_EP]
+    # OUTFIELD ONLY, for the reader-facing teaser (2026-08-06).
+    #
+    # `top_ep` above is unfiltered and stays that way — it is the LLM payload, and
+    # a goalkeeper genuinely projected to score is a fact the writer should have.
+    # But the landing page shows this list to a stranger, and a top five that is
+    # five goalkeepers on near-identical projections reads as broken to anyone who
+    # plays FPL, whatever the model meant by it.
+    #
+    # It is also a real signal, not a rendering quirk: pre-season, or on any fresh
+    # database with an empty `players_archive`, every projection collapses onto the
+    # (position, price-band) baseline and keepers win on clean-sheet points alone
+    # (see the backfill-archive warning in CLAUDE.md). The teaser is the one place
+    # that failure is public, so it does not get to be the shop window.
+    top_outfield = [t for t in
+                    sorted(scored, key=lambda t: t[1]["ep_next4"], reverse=True)
+                    if players[t[0]]["position"] != 1][:PREVIEW_TOP_EP]
     differentials = sorted(
         [(pid, e) for pid, e in scored if players[pid]["ownership_pct"] < DIFFERENTIAL_MAX_OWNERSHIP],
         key=lambda t: t[1]["ep_next4"], reverse=True)[:PREVIEW_DIFFERENTIALS]
@@ -72,8 +88,38 @@ def _gather(deps, gameweek=None):
     blanks, doubles = blanks_and_doubles(fixtures, team_ids, anchor, DEFAULT_HORIZON)
 
     return dict(anchor=anchor, players=players, teams=teams, ep_map=ep_map, notes=notes,
-                most_captained=most_captained, top_ep=top_ep, differentials=differentials,
+                most_captained=most_captained, top_ep=top_ep, top_outfield=top_outfield,
+                differentials=differentials,
                 trap=trap, entering=entering, leaving=leaving, blanks=blanks, doubles=doubles)
+
+
+def _shape_line(g, short) -> str | None:
+    """One sentence on how the gameweek is shaped, or None if it is unremarkable.
+
+    Counts and gameweek numbers only, all straight off `_gather`. It exists
+    because the landing teaser renders ONLY the first section, so without it the
+    entire public preview is a list of five names — true, but not a reason to
+    come back. Every clause is dropped when its input is empty rather than
+    padded, so a quiet week says less instead of saying nothing convincingly.
+    """
+    bits = []
+    if g["entering"]:
+        n = len(g["entering"])
+        bits.append(f"{n} club{'' if n == 1 else 's'} move into a kinder run")
+    if g["leaving"]:
+        n = len(g["leaving"])
+        bits.append(f"{n} into a harder one")
+    for d in g["doubles"][:1]:
+        n = len(d["team_ids"])
+        bits.append(f"{n} club{'' if n == 1 else 's'} play twice in GW{d['gw']}")
+    for b in g["blanks"][:1]:
+        n = len(b["team_ids"])
+        bits.append(f"{n} blank in GW{b['gw']}")
+    if not bits:
+        return None
+    if len(bits) == 1:
+        return f"The shape of it: {bits[0]}."
+    return f"The shape of it: {', '.join(bits[:-1])} and {bits[-1]}."
 
 
 def assemble_generic_payload(deps, gameweek=None) -> str:
@@ -128,10 +174,16 @@ def render_generic_stub(deps, gameweek=None) -> str:
          f"## {PREVIEW_TITLES['the_week_ahead']}"]
     if g["most_captained"]:
         L.append(f"The crowd is on {nm(g['most_captained'])} for the armband.")
-    top = g["top_ep"]
+    # Outfield only, and labelled as such — see the `top_outfield` note in
+    # `_gather`. Saying "outfield" is not a hedge: it is the difference between a
+    # list a reader can check against their own squad and one that looks wrong.
+    top = g["top_outfield"]
     if top:
-        L.append("Top projected points over the next four: "
+        L.append("Top projected outfield points over the next four: "
                  + ", ".join(f"{nm(pid)} ({_r(e['ep_next4'])})" for pid, e in top[:5]) + ".")
+    shape = _shape_line(g, short)
+    if shape:
+        L.append(shape)
 
     L.append(f"\n## {PREVIEW_TITLES['form_and_fixtures']}")
     if g["entering"]:

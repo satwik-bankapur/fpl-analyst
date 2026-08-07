@@ -56,6 +56,21 @@ function LoginInner() {
     getMe().then(setMe).catch(() => setMe(null));
   }, []);
 
+  // Seconds until "send it again" becomes clickable. The server already rate
+  // limits this per address and per IP (auth_email_limiter / auth_link_limiter);
+  // this is the courtesy version of the same rule, so someone who did not get the
+  // mail waits a beat instead of clicking four times and hitting a 429 that reads
+  // like a fault. 30s is the smallest gap where a slow inbox has plausibly
+  // settled.
+  const RESEND_AFTER = 30;
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!agreed || !email.trim()) return;
@@ -66,6 +81,21 @@ function LoginInner() {
       // "If that address can sign in" — never "we sent it" and never "no such
       // account". The API answers identically either way and so must this copy.
       setSent(true);
+      setCooldown(RESEND_AFTER);
+    } catch {
+      setError("Couldn't send the link. Try again in a moment.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resend = async () => {
+    if (cooldown > 0 || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await postRequestLink(email.trim(), next);
+      setCooldown(RESEND_AFTER);
     } catch {
       setError("Couldn't send the link. Try again in a moment.");
     } finally {
@@ -178,9 +208,35 @@ function LoginInner() {
         <div className="mt-5 rounded border border-line-strong bg-surface-700 p-4">
           <p className="m-0 text-body font-medium text-ink-0">Check your email</p>
           <p className="mt-1 text-meta leading-relaxed text-ink-600">
-            If that address can sign in, a link is on its way. It works once and expires
+            If that address can sign in, a link is on its way to{" "}
+            <span className="text-ink-100">{email.trim()}</span>. It works once and expires
             in 15 minutes.
           </p>
+          <p className="mt-2 text-meta leading-relaxed text-ink-700">
+            Not there? Check spam first — then send it again.
+          </p>
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1">
+            <button
+              type="button"
+              onClick={resend}
+              disabled={cooldown > 0 || busy}
+              className="text-meta font-medium text-ink-0 underline disabled:cursor-not-allowed disabled:text-ink-700 disabled:no-underline"
+            >
+              {cooldown > 0 ? `Send it again in ${cooldown}s` : "Send it again"}
+            </button>
+            {/* Escape hatch: the state above replaces the form entirely, so a
+                typo'd address previously needed a page reload to fix. */}
+            <button
+              type="button"
+              onClick={() => {
+                setSent(false);
+                setCooldown(0);
+              }}
+              className="text-meta text-ink-600 underline hover:text-ink-0"
+            >
+              Use a different address
+            </button>
+          </div>
         </div>
       ) : (
         <form onSubmit={submit} className="mt-5 flex flex-col gap-3">
@@ -232,6 +288,22 @@ function LoginInner() {
             </p>
           )}
         </>
+      )}
+
+      {/* Google is configured server-side (both GOOGLE_CLIENT_ID and
+          GOOGLE_CLIENT_SECRET, or neither — accounts.google_enabled). Locally and
+          in any demo build neither is set, so this block used to render nothing
+          at all and the option looked like it did not exist. Say that it does,
+          without offering a button that would 404 at the redirect.
+
+          `me === null` means /api/auth/me never answered, which is a different
+          problem — the API is unreachable — and claiming anything about Google
+          there would be a guess. */}
+      {me && !me.google_enabled && (
+        <p className="mt-5 border-t border-line-dim pt-4 text-meta leading-relaxed text-ink-700">
+          Google sign-in is available on the live site. It is switched off in this
+          build because no Google credentials are configured.
+        </p>
       )}
 
       {error && <p className="mt-4 text-meta text-out-red">{error}</p>}

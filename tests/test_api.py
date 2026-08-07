@@ -241,6 +241,47 @@ def test_preview_latest(golden_sf, client_for):
     assert "gameweek" in body and isinstance(body["sections"], dict) and body["sections"]
 
 
+def test_the_landing_teaser_lists_outfield_players_not_keepers(golden_sf):
+    """The landing page renders ONLY the first preview section, and it was five
+    goalkeepers on near-identical projections — which reads as broken to anyone
+    who plays FPL (2026-08-06).
+
+    It is also a real signal, not a rendering quirk: on a database with an empty
+    `players_archive` every projection collapses onto the (position, price-band)
+    baseline and keepers win on clean-sheet points alone. The teaser is the one
+    place that failure is public.
+    """
+    from graph.deps import Deps
+    from writer.generic import render_generic_stub
+
+    md = render_generic_stub(Deps(session_factory=golden_sf, client=None))
+    headline = md.split("## ")[1]           # the_week_ahead, all the landing shows
+
+    with golden_sf() as s:
+        keepers = {p.web_name for p in s.scalars(select(Player).where(Player.position == 1))}
+    assert keepers, "fixture has no goalkeepers; this test proves nothing"
+
+    top_line = next(l for l in headline.splitlines() if "Top projected" in l)
+    assert "outfield" in top_line, "the list is no longer labelled as outfield-only"
+    named = [k for k in keepers if k in top_line]
+    assert not named, f"goalkeepers in the landing teaser: {named}"
+
+
+def test_the_landing_teaser_says_something_about_the_week(golden_sf):
+    """One line of shape, so the public preview is not just a list of five names.
+
+    Counts and gameweek numbers only — every clause comes straight off the
+    gathered fixture data, and each is dropped when its input is empty rather
+    than padded.
+    """
+    from graph.deps import Deps
+    from writer.generic import render_generic_stub
+
+    md = render_generic_stub(Deps(session_factory=golden_sf, client=None))
+    headline = md.split("## ")[1]
+    assert "The shape of it:" in headline, headline
+
+
 # ===========================================================================
 # Brief — draft path (§1.1) + draft read route (drift-noted gap)
 # ===========================================================================

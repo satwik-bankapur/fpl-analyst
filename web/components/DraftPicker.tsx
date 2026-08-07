@@ -504,6 +504,54 @@ export default function DraftPicker({ onClose }: { onClose: () => void }) {
 
             {/* Mobile pinned footer: budget above the thumb, then the CTA. */}
             <div className="shrink-0 border-t border-line-dim bg-surface-850 px-4 pb-4 pt-3 sm:hidden">
+              {/* YOUR SQUAD SO FAR — mobile only (2026-08-06).
+                  The squad rail above is `hidden … sm:flex`, so below 640px there
+                  was no way to see who you had picked or which clubs were filling
+                  up without scrolling the whole pool hunting for green ticks. The
+                  club counts in particular explain why a row went grey, and they
+                  were desktop-only while the cap applies everywhere. */}
+              {chosen.length > 0 && (
+                <details className="mb-2.5 border-b border-line-dim pb-2.5">
+                  <summary className="cursor-pointer list-none text-eyebrow font-semibold uppercase tracking-[.06em] text-ink-500">
+                    Your squad so far
+                    {captainId && picked[captainId]
+                      ? ` · C ${picked[captainId].web_name}`
+                      : " · no captain yet"}
+                  </summary>
+                  <div className="mt-2 flex flex-col gap-1 text-label text-ink-500">
+                    {POS_ORDER.map((pos) => {
+                      const rows = chosen.filter((p) => p.position === pos);
+                      if (!rows.length) return null;
+                      return (
+                        <div key={pos} className="flex justify-between gap-3">
+                          <span className="truncate">
+                            {pos} · {rows.map((p) => p.web_name).join(", ")}
+                          </span>
+                          <span className="shrink-0 tabular-nums">
+                            £{rows.reduce((s, p) => s + p.price, 0).toFixed(1)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {clubTally.length > 0 && (
+                      <p className="m-0 mt-0.5 text-eyebrow leading-relaxed tracking-normal text-ink-700">
+                        <span className="text-ink-600">Clubs</span>{" "}
+                        {clubTally.map(([clubName, n], i) => (
+                          <span
+                            key={clubName}
+                            className={n >= MAX_PER_CLUB ? "text-ink-0" : undefined}
+                          >
+                            {i > 0 && " · "}
+                            {clubName} {n}
+                          </span>
+                        ))}
+                        {clubTally.some(([, n]) => n >= MAX_PER_CLUB) &&
+                          ` · ${MAX_PER_CLUB} max each`}
+                      </p>
+                    )}
+                  </div>
+                </details>
+              )}
               <div className="mb-2 flex items-baseline justify-between">
                 <span className="text-eyebrow font-semibold uppercase tracking-[.06em] text-ink-500">
                   {chosen.length} of {SQUAD_SIZE} picked
