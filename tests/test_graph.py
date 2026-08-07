@@ -229,6 +229,121 @@ def test_every_problem_type_has_a_plain_english_sentence(kind, evidence, expecte
     assert _problem_sentence(kind, "Saka", evidence) == expected
 
 
+# --- readability pass, 2026-08-06 ------------------------------------------
+#
+# The verdict used to emit one sentence per problem, so a squad with four weak
+# bench spots got four near-copies of "X is projected to return only N points
+# over the next four gameweeks". The single-problem wording above is unchanged;
+# these cover what happens when there are several of one kind.
+
+class _Prob:
+    """The two fields _problem_lines reads off a Problem."""
+
+    def __init__(self, type, player_id, evidence):
+        self.type, self.player_id, self.evidence = type, player_id, evidence
+
+
+def _prob_names(pid):
+    return {1: "Sels", 2: "Wissa", 3: "Rogers", 4: "Muniz", 5: "Areola",
+            6: "Iwobi"}[pid]
+
+
+def test_repeated_bench_problems_become_one_sentence():
+    from graph.nodes.writer import _problem_lines
+
+    lines = _problem_lines(
+        [_Prob("dead_bench_spot", i, [f"ep_next4:{i * 0.4}"]) for i in (1, 2, 3, 4)],
+        _prob_names)
+
+    assert len(lines) == 1, f"expected one grouped sentence, got {lines}"
+    one = lines[0]
+    for name in ("Sels", "Wissa", "Rogers", "Muniz"):
+        assert name in one, f"{name} was dropped by the grouping"
+    assert one.count("projected") == 1, "the repetition is still there"
+
+
+def test_the_grouped_bench_sentence_invents_no_threshold():
+    """A first draft said "each projected under two points" and the demo brief
+    printed it above a 3.0. The engine's cutoff is not two points and is not
+    ours to restate — the sentence may only assert what `dead_bench_spot` itself
+    asserts, and show the numbers."""
+    from graph.nodes.writer import _problem_lines
+
+    one = _problem_lines(
+        [_Prob("dead_bench_spot", 1, ["ep_next4:0.5"]),
+         _Prob("dead_bench_spot", 2, ["ep_next4:3.0"])], _prob_names)[0]
+
+    assert "3.0" in one and "0.5" in one
+    for invented in ("under two", "under 2", "below two", "less than two"):
+        assert invented not in one.lower(), f"invented threshold: {one}"
+
+
+def test_a_long_group_is_truncated_with_an_honest_count():
+    """Ten players in one sentence fixes repetition by producing a data dump."""
+    from graph.nodes.writer import _problem_lines
+
+    names = {i: f"Player{i}" for i in range(1, 11)}
+    one = _problem_lines(
+        [_Prob("cold_form", i, ["form:1.0", "ppg:5.0"]) for i in range(1, 11)],
+        names.get)[0]
+
+    assert one.startswith("10 of your players"), one
+    assert "and 6 others" in one, one
+    assert "Player9" not in one, "the list was not truncated"
+    # The doubled-"and" bug: "A, B, C and D and 6 others".
+    assert " and D and " not in one and one.count(" and ") == 1, one
+
+
+def test_problems_that_carry_news_are_not_grouped():
+    """`unavailable` and `injury_doubt` evidence carries FPL's own news string,
+    which differs per player. Grouping them would drop it."""
+    from graph.nodes.writer import _problem_lines
+
+    lines = _problem_lines(
+        [_Prob("unavailable", 1, ["status:i", "Ankle injury", "unavailable:i"]),
+         _Prob("unavailable", 2, ["status:i", "Suspended - three matches",
+                               "unavailable:s"])],
+        _prob_names)
+
+    assert len(lines) == 2
+    assert "Ankle injury" in lines[0]
+    assert "Suspended - three matches" in lines[1]
+    # ...but the second is reworded, so two in a row do not read as one sentence
+    # with the name swapped.
+    assert lines[0].split()[1] != lines[1].split()[1]
+
+
+def test_four_problems_can_render_as_two_bullets():
+    """The count the verdict prints is of RENDERED lines, not raw problems —
+    "4 things worth your attention" above two bullets is the brief arguing with
+    itself. Three bench spots group into one; the lone cold_form stays its own."""
+    from graph.nodes.writer import _problem_lines
+
+    problems = [_Prob("dead_bench_spot", i, [f"ep_next4:{i}"]) for i in (1, 2, 3)]
+    problems.append(_Prob("cold_form", 4, ["form:1.0", "ppg:5.0"]))
+    assert len(_problem_lines(problems, _prob_names)) == 2
+
+
+def test_identical_blank_weeks_collapse_into_one_line():
+    """Fifteen clubs blanking in five consecutive gameweeks printed five
+    near-identical lines listing all fifteen each time."""
+    from graph.nodes.writer import _by_team_set, _gw_phrase
+
+    class _B:
+        def __init__(self, gw, team_ids):
+            self.gw, self.team_ids = gw, team_ids
+
+    grouped = _by_team_set([_B(gw, [1, 2, 3]) for gw in (39, 40, 41, 42, 43)])
+    assert grouped == [((1, 2, 3), [39, 40, 41, 42, 43])]
+    assert _gw_phrase(grouped[0][1]) == "gameweeks 39-43"
+
+    # Different team sets stay separate, in first-appearance order.
+    mixed = _by_team_set([_B(7, [1, 2]), _B(8, [3]), _B(9, [1, 2])])
+    assert mixed == [((1, 2), [7, 9]), ((3,), [8])]
+    assert _gw_phrase([7, 9]) == "gameweeks 7 and 9"
+    assert _gw_phrase([8]) == "gameweek 8"
+
+
 def test_blank_exposure_counts_players_not_ids():
     from graph.nodes.writer import _problem_sentence
 

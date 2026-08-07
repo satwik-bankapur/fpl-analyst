@@ -42,7 +42,10 @@ from ..state import BriefState
 # the brief input_hash: a writer change must invalidate every cached brief exactly
 # once, or readers keep being served the previous template's prose forever.
 # v1 -> v2 (2026-07-30): humanised phrasing, then computed draft XI.
-STUB_MODEL = "stub-template-v2"
+# v2 -> v3 (2026-08-06): readability pass — repeated problems of one kind fold
+#   into a single sentence, the fixture outlook and watchlist are prose rather
+#   than "Label: a, b, c" fragments.
+STUB_MODEL = "stub-template-v3"
 
 # --- the phrasebook --------------------------------------------------------
 # Evidence keys the upstream nodes emit as "key:value" (layer3 §2.1). Anything
@@ -99,17 +102,30 @@ def _num(value: str | None, default: float = 0.0) -> float:
         return default
 
 
-def _problem_sentence(kind: str, who: str, evidence: list[str]) -> str | None:
-    """One reader-facing clause per diagnosed problem. None = say nothing."""
+def _problem_sentence(kind: str, who: str, evidence: list[str],
+                      *, repeat: bool = False) -> str | None:
+    """One reader-facing clause per diagnosed problem. None = say nothing.
+
+    `repeat=True` means this is the second or later problem of its kind, and asks
+    for a differently-shaped sentence saying the SAME thing. It exists only for
+    the types that cannot be grouped (`unavailable`, `injury_doubt` — see
+    `_GROUPABLE`), where two players in a row would otherwise produce the same
+    sentence with a name swapped.
+
+    The default (`repeat=False`) wording is unchanged and is pinned verbatim by
+    tests/test_graph.py::test_every_problem_type_has_a_plain_english_sentence.
+    """
     vals, notes, pids = _split_evidence(evidence)
     news = "; ".join(n for n in notes if n.strip())
 
     if kind == "unavailable":
-        s = f"{who} is not available to play"
+        s = (f"{who} also can't play" if repeat
+             else f"{who} is not available to play")
         return f"{s} — {news}." if news else f"{s}."
     if kind == "injury_doubt":
         chance = _num(vals.get("chance_of_playing"), 75)
-        s = f"{who} is doubtful, rated {chance:.0f}% likely to play"
+        s = (f"{who} is a doubt too, at {chance:.0f}%" if repeat
+             else f"{who} is doubtful, rated {chance:.0f}% likely to play")
         return f"{s} — {news}." if news else f"{s}."
     if kind == "fixture_cliff":
         club = vals.get("team", "his club")
@@ -128,6 +144,158 @@ def _problem_sentence(kind: str, who: str, evidence: list[str]) -> str | None:
                 "gameweeks, so he adds little from the bench.")
     # An unrecognised problem type: name the player, not the slug.
     return f"{who} needs a look." if who != "your squad" else None
+
+
+def _join(names: list[str]) -> str:
+    """"A", "A and B", "A, B and C" — an Oxford-comma-free serial list."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+# Longest serial list before it stops being a sentence and becomes a data dump.
+# Grouping ten cold-form players into one sentence fixes the repetition and
+# replaces it with something nobody can read; four names plus a count is still a
+# sentence, and the count keeps the claim complete.
+_LIST_LIMIT = 4
+
+
+def _listed(items: list[str], noun: str = "others") -> str:
+    """A serial list, truncated with an honest remainder.
+
+    The truncated form joins with commas only — `_join` would put an "and"
+    before the fourth name and the remainder adds another, giving "A, B, C and D
+    and 6 others".
+    """
+    if len(items) <= _LIST_LIMIT:
+        return _join(items)
+    rest = len(items) - _LIST_LIMIT
+    return f"{', '.join(items[:_LIST_LIMIT])} and {rest} {noun}"
+
+
+# Problem types whose evidence is entirely NUMBERS we re-render ourselves, so
+# several of them can be folded into one sentence without dropping anything.
+#
+# `unavailable` and `injury_doubt` are deliberately NOT here: their evidence
+# carries `players.news`, FPL's own free text ("Knee injury - expected back
+# 12 Apr"), which is the most useful thing in the whole problem and is different
+# for every player. Grouping them would mean either repeating the news inside a
+# list — worse than the repetition being fixed — or silently dropping it.
+_GROUPABLE = {"dead_bench_spot", "cold_form", "fixture_cliff"}
+
+
+def _grouped_sentence(kind: str, entries: list[tuple[str, dict]]) -> str | None:
+    """One sentence covering SEVERAL problems of the same kind.
+
+    `entries` is [(player name, parsed evidence values)], in squad order. Only
+    called with len(entries) > 1; the single case stays in `_problem_sentence`,
+    whose exact wording is pinned by tests and reads better on its own.
+
+    Every number here still comes from that player's own evidence. The only thing
+    added is the count, which is arithmetic on facts we already have.
+    """
+    names = [name for name, _ in entries]
+    n = len(entries)
+
+    if kind == "dead_bench_spot":
+        # THE ONE THIS EXISTS FOR. Previously each bench player got the identical
+        # "X is projected to return only N points over the next four gameweeks"
+        # sentence, so a squad with four weak bench spots read as four near-copies
+        # of the same line — which is what made the stub feel machine-written.
+        #
+        # NOTE THE CLAIM. It says these spots return "little", which is the
+        # engine's own judgement — it raised `dead_bench_spot` for each of them,
+        # and the single-player sentence has always said "adds little from the
+        # bench". It does NOT assert a threshold: a first draft of this said
+        # "each projected under two points" and the demo brief immediately
+        # printed it above a 3.0, because the engine's cutoff is not two points
+        # and was never ours to restate. Every number shown is the player's own,
+        # so a reader who disagrees can see exactly what we based it on.
+        listed = _listed([f"{name} ({_num(v.get('ep_next4')):.1f})"
+                          for name, v in entries])
+        return (f"{n} bench spots are projected to return little over the next "
+                f"four gameweeks: {listed}.")
+
+    if kind == "cold_form":
+        listed = _listed([f"{name} ({_num(v.get('form')):.1f} against "
+                          f"{_num(v.get('ppg')):.1f} per game)" for name, v in entries])
+        return (f"{n} of your players are scoring below their own season "
+                f"averages right now: {listed}.")
+
+    if kind == "fixture_cliff":
+        clubs = _join(sorted({v.get("team", "") for _, v in entries} - {""}))
+        who = _listed(names)
+        return (f"{who} face a harder run from here"
+                + (f" — {clubs} all have a difficult set of fixtures." if clubs
+                   else "."))
+    return None
+
+
+def _by_team_set(events) -> list[tuple[tuple, list[int]]]:
+    """Collapse fixture events that name the SAME clubs into one entry.
+
+    `events` is a list of things carrying `.gw` and `.team_ids` (doubles or
+    blanks). Returns [(team_ids, [gameweeks])], first-appearance order preserved
+    so the output stays deterministic.
+    """
+    order: list[tuple] = []
+    gws: dict[tuple, list[int]] = {}
+    for e in events:
+        key = tuple(e.team_ids)
+        if key not in gws:
+            order.append(key)
+            gws[key] = []
+        gws[key].append(e.gw)
+    return [(k, gws[k]) for k in order]
+
+
+def _gw_phrase(gws: list[int]) -> str:
+    """"gameweek 7" / "gameweeks 7 and 9" / "gameweeks 39-43" for a run."""
+    if len(gws) == 1:
+        return f"gameweek {gws[0]}"
+    ordered = sorted(gws)
+    if ordered == list(range(ordered[0], ordered[-1] + 1)):
+        return f"gameweeks {ordered[0]}-{ordered[-1]}"
+    return f"gameweeks {_join([str(g) for g in ordered])}"
+
+
+def _problem_lines(problems, name_of) -> list[str]:
+    """The verdict's problem bullets: one sentence per problem, or per GROUP.
+
+    Groups by type while preserving the order each type first appears, so the
+    output stays deterministic — the whole engine is, and a brief whose sentences
+    reorder between identical runs would break the cache's reason for existing.
+
+    Returns rendered sentences. The caller must count THESE rather than the raw
+    problem list: after grouping, "4 things worth your attention" above two
+    bullets is a brief arguing with itself.
+    """
+    order: list[str] = []
+    by_kind: dict[str, list] = {}
+    for p in problems:
+        if p.type not in by_kind:
+            order.append(p.type)
+            by_kind[p.type] = []
+        by_kind[p.type].append(p)
+
+    lines: list[str] = []
+    for kind in order:
+        group = by_kind[kind]
+        if len(group) > 1 and kind in _GROUPABLE:
+            entries = [(name_of(p.player_id) if p.player_id else "your squad",
+                        _split_evidence(p.evidence)[0]) for p in group]
+            sentence = _grouped_sentence(kind, entries)
+            if sentence:
+                lines.append(sentence)
+                continue
+        for i, p in enumerate(group):
+            who = name_of(p.player_id) if p.player_id else "your squad"
+            sentence = _problem_sentence(p.type, who, p.evidence, repeat=i > 0)
+            if sentence:
+                lines.append(sentence)
+    return lines
 
 
 def _code_notes(codes: list[str]) -> list[str]:
@@ -192,14 +360,15 @@ def writer(state: BriefState, deps: Deps) -> dict:
         # the projection means nothing if the reader assumes it is their own XI.
         L.append("- Best XI picked from your 15: a draft has no set lineup, so the "
                  "eleven above were chosen on projected points.")
-    if diag.problems:
-        L.append(f"- {len(diag.problems)} thing"
-                 f"{'' if len(diag.problems) == 1 else 's'} worth your attention:")
-        for p in diag.problems:
-            who = nm(p.player_id) if p.player_id else "your squad"
-            sentence = _problem_sentence(p.type, who, p.evidence)
-            if sentence:
-                L.append(f"  - {sentence}")
+    problem_lines = _problem_lines(diag.problems, nm)
+    if problem_lines:
+        # Count the RENDERED lines, not diag.problems. Grouping means four bench
+        # problems become one sentence, and "4 things worth your attention" above
+        # two bullets is the brief contradicting itself in the reader's face.
+        n = len(problem_lines)
+        L.append(f"- {n} thing{'' if n == 1 else 's'} worth your attention:")
+        for sentence in problem_lines:
+            L.append(f"  - {sentence}")
     else:
         L.append("- Nothing in the squad needs attention this week.")
 
@@ -244,18 +413,26 @@ def writer(state: BriefState, deps: Deps) -> dict:
                  + " → ".join(f"{nm(pid)} ({club(pid)})" for pid in dec.bench_order))
     else:
         L.append("- No bench order could be resolved from this squad.")
+    # The forward view, as sentences rather than "Label: a, b, c" fragments
+    # (2026-08-06). Same facts, same order, same club codes — the colon-list form
+    # read like a database dump, which is what the readability pass was for.
     if fx.entering_good_run:
-        L.append("- Fixtures easing for: "
-                 + ", ".join(short(t) for t in fx.entering_good_run) + ".")
+        teams_ = _join([short(t) for t in fx.entering_good_run])
+        L.append(f"- Fixtures ease from here for {teams_}.")
     if fx.leaving_good_run:
-        L.append("- Fixtures getting harder for: "
-                 + ", ".join(short(t) for t in fx.leaving_good_run) + ".")
-    for d in fx.doubles:
-        L.append(f"- Two fixtures in gameweek {d.gw} for: "
-                 + ", ".join(short(t) for t in d.team_ids) + ".")
-    for b in fx.blanks:
-        L.append(f"- No fixture in gameweek {b.gw} for: "
-                 + ", ".join(short(t) for t in b.team_ids) + ".")
+        teams_ = _join([short(t) for t in fx.leaving_good_run])
+        L.append(f"- They get harder for {teams_}.")
+    # Doubles and blanks are collapsed by TEAM SET (2026-08-06): the same fifteen
+    # clubs blanking in five consecutive gameweeks previously printed five
+    # near-identical lines listing all fifteen each time. Same facts, same
+    # gameweek numbers, said once.
+    for team_ids, gws in _by_team_set(fx.doubles):
+        L.append(f"- {_listed([short(t) for t in team_ids], 'more')} play twice "
+                 f"in {_gw_phrase(gws)}.")
+    for team_ids, gws in _by_team_set(fx.blanks):
+        names_ = _listed([short(t) for t in team_ids], "more")
+        plural = "have" if len(team_ids) > 1 else "has"
+        L.append(f"- {names_} {plural} no fixture at all in {_gw_phrase(gws)}.")
 
     # --- Chips (only when the stance is not a plain hold, per the prompt) ---
     if dec.chip_stance and dec.chip_stance != "hold":
@@ -272,8 +449,11 @@ def writer(state: BriefState, deps: Deps) -> dict:
     # --- Watchlist ---
     L.append(f"\n## {SECTION_TITLES['watchlist']}")
     if dec.watchlist:
-        for pid in dec.watchlist:
-            L.append(f"- {nm(pid)} ({club(pid)})")
+        # One sentence, not a column of bare "Name (CLU)" fragments (2026-08-06).
+        # Nothing is added or implied — it is the same names in the same order,
+        # in a form a person would actually say out loud.
+        L.append("- Worth keeping an eye on: "
+                 + _join([f"{nm(pid)} ({club(pid)})" for pid in dec.watchlist]) + ".")
     else:
         L.append("- Nothing worth adding to a watchlist this week.")
 
